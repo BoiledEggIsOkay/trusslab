@@ -4,16 +4,7 @@ TrussLab is a browser app for linear-elastic analysis of 2D pin-jointed trusses 
 
 ## Skills in this repository
 
-Load the matching skill before you start; they hold the detail this file only summarises.
-
-- `trusslab-milestone-workflow`: how every milestone, bug fix or refactor is planned, verified, reported and committed.
-- `trusslab-architecture`: files, globals, script order, and the rules for DOM-free code.
-- `trusslab-engineering-rules`: the structural model, units, signs and engineering restrictions, with references for the model and save-file format, the analysis mathematics, and the design conventions.
-- `trusslab-testing`: the headless suites, the browser smoke test, regression-test discipline, and `scripts/check.sh`.
-- `trusslab-ui-design`: information architecture, visual hierarchy, design tokens, accessibility, keyboard and responsive rules for the TrussLab interface, the element names and wording the smoke test relies on, and the process for the UI/UX redesign milestone. Use it before any change to `index.html`, `style.css` or the page-facing parts of `script.js`, for wireframes and mock-ups, and for any educational interface.
-- `frontend-design`: Anthropic's general skill for deliberate, non-generic visual design, vendored unmodified under Apache 2.0 (source, commit and hashes in its `UPSTREAM.md`). Read it through `trusslab-ui-design`, which takes precedence for TrussLab. Never edit the vendored files.
-
-A skill for the education system will be added when that system is built.
+Load the matching project skill before you start (the skill list describes each one); they hold the detail this file only summarises. `frontend-design` is Anthropic's general design skill, vendored unmodified under Apache 2.0 (source, commit and hashes in its `UPSTREAM.md`): read it through `trusslab-ui-design`, which takes precedence for TrussLab, and never edit the vendored files. A skill for the education system will be added when that system is built.
 
 ## Hard constraints
 
@@ -36,7 +27,7 @@ Keep `fea-core.js` one self-contained file. Change its mathematical formulation 
 | Global | Defined in | Notes |
 |---|---|---|
 | `FEA` | `fea-core.js` | Numerical engine; also `module.exports` under Node |
-| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects and load cases, material densities and the generated self-weight case (`memberSelfWeight`, `selfWeightLoads`, `caseLoads`, `selfWeightSummary`), load combinations (`combinationLoads`, `analyzeCombination`, `analyzeCombinations`, `combinationEnvelope`), file format version 2 (`readModel` also reads version 1 files, reports and sessions), `validateModel`, examples, `toAnalysisInput`, saved-session storage with injected `Storage` (`loadStoredSession`, `saveStoredSession`); also `module.exports` under Node |
+| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects and load cases, material densities and the generated self-weight case, load combinations, file format version 2 (`readModel` also reads version 1 files, reports and sessions), `validateModel`, examples, `toAnalysisInput`, saved-session storage with injected `Storage`; also `module.exports` under Node |
 | `TrussLab` | `script.js` (end) | Older test hook that exposes live internal state. Keep it unchanged for compatibility; new code and tests must not depend on it |
 | `TrussLabTest` | `script.js` section 17 | Testing adapter, version 2, installed only in smoke mode (`?smoke`) |
 
@@ -59,12 +50,13 @@ Done:
 - `0bb4657` Rev 2, milestone 1: browser smoke test and the `TrussLabTest` adapter.
 - `0e3dbae` Rev 3: the D and G shortcuts refresh the legend and autosave.
 - `3b88695`, `1a0b122`: `CLAUDE.md`, the project Skills, local testing notes, the vendored `frontend-design` Skill, `trusslab-ui-design` and the redesign milestone.
-- `4712cba` Rev 4, milestone 2: DOM-free model layer. `model.js` (global `TrussModel`) with `toAnalysisInput`, `test/model.test.js` (206 checks) and the example baseline `test/fixtures/examples-baseline.js`. No behaviour change; file format version 1 unchanged.
-- `dac8c99` Rev 5, milestone 3: load cases. Loads and settlements belong to load cases; supports keep only their restraint (type, angle, fixed axes). λ scales loads and settlements. File format version 2, reading version 1 model files, report files and autosaved sessions (with migration tests for each); verified session migration, backups of unreadable sessions, no writes after a failed read, import notes kept with the session, "Changes not saved — browser storage unavailable" status notes; model warnings (`validateModel`); `TrussLabTest` version 2.
-- `1e4820c` Rev 6, milestone 4: material density and the generated self-weight load case. Materials carry a density ρ in kg/m³ (presets: steel 7850, aluminium 2700, Douglas fir 540; none for a custom material or for materials read from older files). **+ Self-weight case** adds one generated dead-load case: W = ρ·A·L·g (g = 9.80665 m/s²) per member, W/2 downward at each end node, computed from the current model whenever it is read, never stored, so it cannot go stale or accumulate; manual loads and settlements are refused in it. Saved as additive optional fields of file format version 2 (`density`, `"generated": "self-weight"`). Warnings for materials without density.
-- `16d3fc9` Rev 7, milestone 4 decisions (maintainer, final): file format stays version 2 with optional fields, no new session key, and the downgrade limitation for a milestone 3 build is documented (README, `model-format.md` §8). Missing densities are never filled in from a preset, even when E and σy match it, and a self-weight case with a member lacking density is marked incomplete wherever it is shown (`selfWeightSummary`: health report, node Inspector, canvas HUD, report exports). Douglas fir 540 kg/m³ is labelled an approximate representative value at 12 % moisture content (USDA FPL *Wood Handbook* 2021, Table 5–3b: specific gravity 0.48; 1000 × 0.48 × 1.12 = 537.6, rounded).
+- `4712cba` Rev 4, milestone 2: DOM-free model layer (`model.js`, global `TrussModel`) and the example baseline; no behaviour change.
+- `dac8c99` Rev 5, milestone 3: load cases, λ on loads and settlements, file format version 2 reading version 1 files, reports and sessions, verified session storage, `validateModel`, `TrussLabTest` version 2.
+- `1e4820c` Rev 6, milestone 4: material density and the generated self-weight case.
+- `16d3fc9` Rev 7, milestone 4 decisions (maintainer, final): version 2 with optional fields and a documented downgrade limitation; missing densities never filled in from a preset; a self-weight case lacking a density always marked incomplete; Douglas fir 540 kg/m³ labelled approximate.
+- `4ff2eb9` Rev 8, milestone 5: load combinations, each solved directly, with the worst governing value over their own results.
 
-- Milestone 5: load combinations. A combination holds factors γ on load cases (the self-weight case included; negative and 0 allowed); its actions F = Σγᵢ·Fᵢ and u_s = Σγᵢ·u_s,ᵢ are built first and solved directly with `FEA.analyze`, then λ multiplies the whole once. Any combination can be solved, active or not (`analyzeCombination`, `analyzeCombinations`), each with its own complete result; `combinationEnvelope` gives the worst governing value, the lowest SF among the combinations' own results, never a sum of safety factors or utilisations. Shown through the load-case list ("Combinations"), with a factor field per load case, read-only combined actions in the Inspector, the HUD, a health-report overview of every combination, and `combinationResults` in reports. Saved as optional fields of file format version 2 (`combinations`, `activeCombination`), with the downgrade limitation documented.
+The rules and decisions behind each milestone are in `README.md` and in `trusslab-engineering-rules` with its references.
 
 Next, strictly one at a time, each approved before the next begins:
 6. UI/UX redesign, before any educational interface (follow `trusslab-ui-design`):

@@ -708,6 +708,7 @@
     sel: '#fbbf24', hover: '#38bdf8', support: '#8fa3bb', custom: '#a78bfa', load: '#fbbf24', reaction: '#34d399',
     tension: [59, 130, 246], compression: [239, 68, 68], zero: [107, 114, 128], mech: '#fbbf24', fail: '#f87171',
   };
+  const ZERO_COLOR = `rgb(${COL.zero.join(',')})`;
   let renderQueued = false;
   function requestRender() { if (!renderQueued) { renderQueued = true; requestAnimationFrame(frame); } }
   function frame(now) {
@@ -734,7 +735,7 @@
   function mix(c0, c1, t) { return `rgb(${Math.round(c0[0] + (c1[0] - c0[0]) * t)},${Math.round(c0[1] + (c1[1] - c0[1]) * t)},${Math.round(c0[2] + (c1[2] - c0[2]) * t)})`; }
   /** Member colour: blue tension, red compression, grey zero-force; intensity ∝ |value| / max. */
   function memberColor(mr, scaleMax) {
-    if (!mr || mr.state === 'zero') return mix(COL.zero, COL.zero, 0);
+    if (!mr || mr.state === 'zero') return ZERO_COLOR;
     const v = colorValue(mr);
     const t = scaleMax > 0 ? clamp(Math.abs(v) / scaleMax, 0, 1) : 1;
     return mix(COL.zero, mr.force > 0 ? COL.tension : COL.compression, 0.35 + 0.65 * Math.sqrt(t));
@@ -1348,9 +1349,19 @@
   }
 
   const isTyping = (el) => el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA') && el.type !== 'checkbox' && el.type !== 'radio' && el.type !== 'range';
+  const isToggle = (el) => el && el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio');
+  /** Keys the focused control handles natively: Enter/Space press buttons, Space toggles checkboxes, arrows move sliders and radio groups. */
+  function nativeKey(el, key) {
+    if (!el) return false;
+    if (key === 'Enter') return el.tagName === 'BUTTON' || el.tagName === 'SUMMARY';
+    if (key === ' ') return el.tagName === 'BUTTON' || el.tagName === 'SUMMARY' || isToggle(el);
+    if (key.startsWith('Arrow')) return el.tagName === 'INPUT' && (el.type === 'range' || el.type === 'radio');
+    return false;
+  }
   window.addEventListener('keydown', (e) => {
     if (!$('#helpModal').hidden) { if (e.key === 'Escape') toggleHelp(false); return; }
     if (isTyping(e.target)) { if (e.key === 'Escape') e.target.blur(); return; }
+    if (nativeKey(e.target, e.key)) return;
     const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
     if (mod) {
       if (k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
@@ -1581,7 +1592,9 @@
       </div>`).join('');
     box.querySelectorAll('.grp-row').forEach((row) => {
       const g = state.model.groups[+row.dataset.gi];
-      row.querySelector('input[type=radio]').addEventListener('click', (e) => { e.stopPropagation(); state.activeGroup = g; if (state.tool === 'member') renderToolOptions(); });
+      const radio = row.querySelector('input[type=radio]');
+      radio.addEventListener('click', (e) => e.stopPropagation()); // do not open the group editor
+      radio.addEventListener('change', () => { state.activeGroup = g; if (state.tool === 'member') renderToolOptions(); }); // mouse or arrow keys
       row.addEventListener('click', () => { state.editGroup = state.editGroup === g ? null : g; renderGroups(); renderGroupEditor(); });
     });
   }
@@ -1687,11 +1700,15 @@
     $('#rngLoadFactor').value = String(clamp(s.loadFactor, 0, 3));
     if (document.activeElement !== $('#numLoadFactor')) $('#numLoadFactor').value = inVal(s.loadFactor);
     if (document.activeElement !== $('#numTargetSF')) $('#numTargetSF').value = inVal(s.targetSF);
+    syncMatrixUI();
+    $('#sbSnap').textContent = `snap ${s.snap ? s.grid + ' m' : 'off'}`;
+    syncScaleUI();
+  }
+  function syncMatrixUI() {
+    const s = state.s;
     $$('#segMatrix button').forEach((b) => b.classList.toggle('on', b.dataset.mtx === s.mtxView));
     $$('#segMtxMode button').forEach((b) => b.classList.toggle('on', b.dataset.mode === s.mtxMode));
     $('#selMtxUnit').value = s.mtxUnit; $('#chkHideZeros').checked = s.mtxDimZeros;
-    $('#sbSnap').textContent = `snap ${s.snap ? s.grid + ' m' : 'off'}`;
-    syncScaleUI();
   }
 
   function bindLeftPanel() {
@@ -1958,7 +1975,7 @@
       box.innerHTML = memberGeometry(e) + `
         <div class="sub-h">Results</div>
         <dl class="kv">
-          <dt>Axial force F</dt><dd class="${z ? '' : mr.force > 0 ? '' : ''}">${z ? '0' : fF(mr.force, ref)} ${fu} <small>${z ? 'zero-force' : mr.state}</small></dd>
+          <dt>Axial force F</dt><dd>${z ? '0' : fF(mr.force, ref)} ${fu} <small>${z ? 'zero-force' : mr.state}</small></dd>
           <dt>Stress σ = F/A</dt><dd>${z ? '0' : fS(mr.stress)} MPa</dd>
           <dt>Strain ε = ΔL/L</dt><dd>${z ? '0' : fmt(mr.strain)}</dd>
           <dt>Elongation ΔL</dt><dd>${z ? '0' : fD(mr.elong)} ${du}</dd>
@@ -2311,7 +2328,7 @@
     return { M: mr.ke, n: 4, labels: mr.dofs.map((d) => r.dofLabels[d]), fixed: () => false, title: `Element stiffness matrix [kᵉ] of M${i + 1} (global axes): EA/L = ${fmt(mr.k / (STIFF_UNITS[state.s.mtxUnit] || 1), 6)} ${state.s.mtxUnit}, c = ${fmt(mr.c, 6)}, s = ${fmt(mr.s, 6)}`, legend: '' };
   }
   function renderMatrix() {
-    syncSettingsUI();
+    syncMatrixUI();
     const view = $('#mtxView'), info = $('#mtxInfo');
     const d = matrixData();
     $('#segMatrix button[data-mtx="transformed"]').disabled = !(state.res && state.res.rotated && state.res.rotated.length);
@@ -2671,7 +2688,11 @@
     $('#helpModal').addEventListener('click', (e) => { if (e.target.id === 'helpModal') toggleHelp(false); });
     $('#btnPanels').addEventListener('click', () => {
       const app = $('#app');
-      if (window.innerWidth <= 920) app.classList.toggle('show-panels'); else app.classList.toggle('no-panels');
+      if (window.innerWidth <= 920) { // room for one side panel at a time: none -> left -> right -> none
+        if (app.classList.contains('show-left')) app.classList.replace('show-left', 'show-right');
+        else if (app.classList.contains('show-right')) app.classList.remove('show-right');
+        else app.classList.add('show-left');
+      } else app.classList.toggle('no-panels');
       setTimeout(resizeCanvas, 0);
     });
     $$('#tools .tool').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));

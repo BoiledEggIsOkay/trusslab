@@ -16,6 +16,7 @@ python3 -m http.server 8000   # then browse to http://localhost:8000
 | `style.css` | Dark CAD-style theme |
 | `fea-core.js` | Numerical engine (no DOM). Usable from Node: `require('./fea-core.js').analyze(input)` |
 | `script.js` | Editor, canvas rendering, inspector, tables, matrix inspector and exports |
+| `test/fea-core.test.js` | Regression tests for the numerical engine (see [Accuracy checks performed](#accuracy-checks-performed)) |
 
 The session (model, view, settings) is autosaved to `localStorage`.
 
@@ -66,7 +67,15 @@ The session (model, view, settings) is autosaved to `localStorage`.
 
 ## Accuracy checks performed
 
-These checks were run against `fea-core.js` during development:
+These checks were run against `fea-core.js` during development. All of them except the X-braced truss are automated in `test/fea-core.test.js`. Run it from the project folder:
+
+```bash
+node test/fea-core.test.js
+# macOS without Node, using the built-in JavaScriptCore engine:
+/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc test/fea-core.test.js
+```
+
+It prints one line per check and exits with a non-zero code if any check fails.
 
 | Case | Reference | Max. relative error |
 |------|-----------|---------------------|

@@ -825,11 +825,9 @@
     for (let i = 0; i < n; i++) {
       if (!active[i]) continue;
       const x = nodes[i].x - cx, y = nodes[i].y - cy;
-      const tx = F[2 * i] + R[2 * i], ty = F[2 * i + 1] + R[2 * i + 1];
       accAddProd(x, F[2 * i + 1]); accAddProd(x, R[2 * i + 1]);
       accAddProd(-y, F[2 * i]); accAddProd(-y, R[2 * i]);
       refM += Math.abs(x) * (Math.abs(F[2 * i + 1]) + Math.abs(R[2 * i + 1])) + Math.abs(y) * (Math.abs(F[2 * i]) + Math.abs(R[2 * i]));
-      void tx; void ty;
     }
     const sumM = accGet();
     const refF = refFx + refFy;

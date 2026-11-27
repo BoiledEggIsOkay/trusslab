@@ -437,7 +437,9 @@ table.mat td { padding: 1px 8px; text-align: right; }
 @media (max-width: 920px) {
   #app { grid-template-columns: 0 minmax(0, 1fr) 0; }
   #app .panel { display: none; }
-  #app.show-panels { grid-template-columns: 260px minmax(0, 1fr) 0; }
-  #app.show-panels .panel.left { display: block; }
+  #app.show-left { grid-template-columns: 260px minmax(0, 1fr) 0; }
+  #app.show-left .panel.left { display: block; }
+  #app.show-right { grid-template-columns: 0 minmax(0, 1fr) 280px; }
+  #app.show-right .panel.right { display: block; }
   .brand-text { display: none; }
 }

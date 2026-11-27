@@ -2,7 +2,7 @@ MIT No Attribution
 
 SPDX-License-Identifier: MIT-0
 
-Copyright 2025 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Copyright 2026 BoiledEggIsOkay
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this
 software and associated documentation files (the "Software"), to deal in the Software

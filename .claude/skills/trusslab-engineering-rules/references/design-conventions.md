@@ -22,6 +22,8 @@ A design check evaluates every required combination separately (each solved dire
 
 Never add safety factors, utilisations or member classifications across load cases or combinations. They are not linear in the loads, and a sum has no physical meaning.
 
+Since milestone 5, `TrussModel.combinationEnvelope(model, runs)` takes the results of `analyzeCombinations` and returns, for every member, its lowest SF, largest tension and largest compression, each with the combination that produces it, and `governing`: the lowest SF of any member in any combination, with its member, mode and combination. Every value is read from one combination's own result. A combination that could not be solved is listed in `unsolved`, and `complete` is false: then no statement covers every combination. The page shows this in the health report when a combination is on screen, and reports export it as `combinationResults`.
+
 ## 4. Section sizing (milestone 10)
 
 - Use discrete candidate sections, organised by the existing section groups and sorted by linear mass m′ = ρA. Never brute-force combinations of sections across members.

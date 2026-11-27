@@ -60,7 +60,9 @@ testCase('Loading and API', () => {
     'nodeSettlement', 'setNodeSettlement', 'modelHasSettlement', 'FORMAT_VERSION', 'serialize', 'readModel', 'deserialize', 'validateModel',
     'EXAMPLES', 'buildExample', 'toAnalysisInput', 'SESSION_KEYS', 'SMOKE_SESSION_KEYS', 'loadStoredSession', 'saveStoredSession', 'backupUnreadable',
     'caseLoads', 'GRAVITY', 'SELF_WEIGHT', 'validDensity', 'isGeneratedCase', 'memberSelfWeight', 'selfWeightLoads', 'selfWeightCase', 'addSelfWeightCase',
-    'selfWeightSummary'];
+    'selfWeightSummary', 'isCombination', 'makeCombination', 'addCombination', 'removeCombination', 'setActiveCombination', 'combinationFactor',
+    'setCombinationFactor', 'combinationLoads', 'combinationSettlements', 'caseSettlements', 'activeTarget', 'analyzeCombination', 'analyzeCombinations',
+    'combinationEnvelope'];
   const missing = want.filter((k) => !(k in TM));
   check('TrussModel exports the whole model API', missing.length === 0, `missing ${missing.join(', ')}`);
   check('model.js loaded and works with no DOM present', typeof document === 'undefined' && typeof TM.buildExample('aframe') === 'object');
@@ -217,7 +219,9 @@ testCase('Serialisation (file format version 2)', () => {
   const m = TM.buildExample('inclined'), f = TM.serialize(m);
   same('header: format, version 2 and units', [f.format, f.version, f.units, TM.FORMAT_VERSION],
     ['trusslab-model', 2, { length: 'm', force: 'N', stress: 'Pa', area: 'm^2', inertia: 'm^4', angle: 'deg' }, 2]);
-  same('top-level fields', Object.keys(f), ['format', 'version', 'units', 'title', 'materials', 'sections', 'nodes', 'members', 'loadCases', 'activeLoadCase']);
+  same('top-level fields (milestone 5 added the optional combinations and activeCombination)', Object.keys(f),
+    ['format', 'version', 'units', 'title', 'materials', 'sections', 'nodes', 'members', 'loadCases', 'activeLoadCase', 'combinations', 'activeCombination']);
+  same('a model without combinations writes an empty list and no active combination', [f.combinations, f.activeCombination], [[], null]);
   check('ids are 1-based and sequential', [f.materials, f.sections, f.nodes, f.members, f.loadCases].every((list) => list.every((x, i) => x.id === i + 1)));
   same('the load case holds the nodal load, as a sparse entry', f.loadCases, [{ id: 1, name: 'Load case 1', loads: [{ node: 3, fx: 20e3, fy: -50e3 }], settlements: [] }]);
   check('the active load case is named by id', f.activeLoadCase === 1);
@@ -1140,6 +1144,299 @@ testCase('The examples against hand statics', () => {
   check('settlement: the middle support moves by exactly -10 mm', st.nodes[4].uy === -0.01);
   const mech = analyse(TM.buildExample('mechanism'));
   check('mechanism: rejected as unstable with one internal mechanism', !mech.ok && mech.mechanism.nullity === 1 && mech.mechanism.modes[0].kind === 'internal');
+});
+
+/* ---------- milestone 5: load combinations, each solved directly as one complete action state ---------- */
+// Hand references use the determinate test truss swTruss(): A (0, 0) pin, B (6, 0) roller (uy = 0), apex C (3, 4).
+// A horizontal load H at C (+x): N_AC = +5H/6, N_BC = −5H/6, N_AB = +H/2 (joints B and A, R_By = 2H/3).
+// A vertical load P down at C: N_AC = N_BC = −P/1.6, N_AB = +3P/8 (sin θ = 0.8, cos θ = 0.6).
+const H = 100e3, P = 100e3;
+function comboTruss() {
+  const t = swTruss(), m = t.m;
+  const hor = m.loadCases[0]; hor.name = 'Horizontal';
+  TM.setNodeLoad(m, t.C, H, 0, hor);
+  const ver = TM.addLoadCase(m, 'Vertical');
+  TM.setNodeLoad(m, t.C, 0, -P, ver);
+  return Object.assign(t, { hor, ver });
+}
+const forces = (r) => r.members.map((x) => x.force);
+
+testCase('Combinations: creating, editing, renaming and deleting', () => {
+  const { m, hor, ver, C } = comboTruss();
+  check('a new model has no combinations and none active', m.combinations.length === 0 && m.activeCombination === null && TM.emptyModel().combinations.length === 0);
+  const c1 = TM.addCombination(m), c2 = TM.addCombination(m);
+  same('new combinations are named "Combination 1", "Combination 2" and are not active', [c1.name, c2.name, m.activeCombination], ['Combination 1', 'Combination 2', null]);
+  check('isCombination tells combinations from load cases', TM.isCombination(c1) && !TM.isCombination(hor) && !TM.isCombination(null));
+  check('factors are set for load cases of the model', TM.setCombinationFactor(m, c1, ver, 1.5) && TM.setCombinationFactor(m, c1, hor, 1.35));
+  same('... and kept in load-case order, whatever order they were entered in', c1.terms.map((t) => [t.loadCase.name, t.factor]), [['Horizontal', 1.35], ['Vertical', 1.5]]);
+  check('setting a factor again replaces it', TM.setCombinationFactor(m, c1, ver, -0.5) && TM.combinationFactor(c1, ver) === -0.5 && c1.terms.length === 2);
+  check('0 is a valid factor: the case stays listed', TM.setCombinationFactor(m, c1, ver, 0) && TM.combinationFactor(c1, ver) === 0 && c1.terms.length === 2);
+  for (const bad of [NaN, Infinity, -Infinity, '1.5', true, {}]) {
+    check(`an invalid factor (${String(bad)}) is refused and changes nothing`, !TM.setCombinationFactor(m, c1, ver, bad) && TM.combinationFactor(c1, ver) === 0);
+  }
+  const other = TM.emptyModel();
+  check('a load case of another model is refused', !TM.setCombinationFactor(m, c1, other.loadCases[0], 1) && c1.terms.length === 2);
+  check('... and so is a combination that is not in the model', !TM.setCombinationFactor(m, TM.makeCombination('x'), hor, 1));
+  check('null removes a case from the combination', TM.setCombinationFactor(m, c1, ver, null) && TM.combinationFactor(c1, ver) === null && c1.terms.length === 1);
+  c1.name = 'ULS 1';
+  check('a combination is renamed through its name, which is saved', TM.serialize(m).combinations[0].name === 'ULS 1');
+  TM.setActiveCombination(m, c1);
+  check('setActiveCombination makes it the analysed state; the active load case is kept', m.activeCombination === c1 && m.activeCase === hor && TM.activeTarget(m) === c1);
+  const before = JSON.stringify(TM.serialize(m));
+  check('loads cannot be entered in a combination: setNodeLoad refuses (default and explicit) and changes nothing',
+    !TM.setNodeLoad(m, C, 1, 2) && !TM.setNodeLoad(m, C, 1, 2, c1) && JSON.stringify(TM.serialize(m)) === before);
+  check('... and neither can settlements', !TM.setNodeSettlement(m, C, 0.01, 0) && !TM.setNodeSettlement(m, C, 0.01, 0, c1) && JSON.stringify(TM.serialize(m)) === before);
+  check('setNodeLoad still enters into a load case named explicitly', TM.setNodeLoad(m, C, 0, -P, ver));
+  TM.setActiveLoadCase(m, ver);
+  check('choosing a load case leaves the combination: the case is analysed again', m.activeCombination === null && TM.activeTarget(m) === ver);
+  TM.setActiveCombination(m, c2);
+  check('setActiveCombination(null) also goes back to the active case', TM.setActiveCombination(m, null) === null && TM.activeTarget(m) === ver);
+  TM.setActiveCombination(m, c1);
+  TM.setCombinationFactor(m, c2, hor, 2); TM.setCombinationFactor(m, c2, ver, 3);
+  check('deleting a load case removes its factor from every combination', TM.removeLoadCase(m, hor) && c1.terms.length === 0 && c2.terms.map((t) => t.loadCase).join() === [ver].join() && TM.combinationFactor(c2, ver) === 3);
+  check('deleting the active combination shows the active load case again', TM.removeCombination(m, c1) && m.activeCombination === null && m.combinations.length === 1 && TM.activeTarget(m) === m.activeCase);
+  check('deleting a combination that is not in the model does nothing', !TM.removeCombination(m, c1) && m.combinations.length === 1);
+  const c3 = TM.addCombination(m);
+  check('a new combination takes the next free number ("Combination 2" is still taken)', c3.name === 'Combination 3');
+});
+
+testCase('Combination actions: F = Σ γᵢ·Fᵢ and u_s = Σ γᵢ·u_s,ᵢ, then λ once (closed form)', () => {
+  const { m, hor, ver, A, B, C } = comboTruss();
+  const one = TM.addCombination(m, 'one'); TM.setCombinationFactor(m, one, ver, 1);
+  const inV = TM.toAnalysisInput(m, { loadCase: ver }), inOne = TM.toAnalysisInput(m, { combination: one });
+  same('a single case with γ = 1: exactly the solver input of the case itself', inOne, inV);
+  const rV = analyse(m, { loadCase: ver }), rOne = TM.analyzeCombination(m, one, {});
+  check('... and exactly its results', rOne.ok && rOne.members.every((x, k) => Object.is(x.force, rV.members[k].force)) && rOne.nodes.every((n, i) => Object.is(n.ry, rV.nodes[i].ry)));
+  const two = TM.addCombination(m, 'two'); TM.setCombinationFactor(m, two, hor, 1.35); TM.setCombinationFactor(m, two, ver, 1.5);
+  const in2 = TM.toAnalysisInput(m, { combination: two });
+  check('two cases: F_C = 1.35·(H, 0) + 1.5·(0, −P) exactly', in2.nodes[2].fx === 1.35 * H && in2.nodes[2].fy === 1.5 * -P && in2.nodes[0].fx === 0 && in2.nodes[1].fy === 0);
+  const r2 = TM.analyzeCombination(m, two, {});
+  closeArray('two cases: member forces 1.35·(5H/6, −5H/6, H/2) + 1.5·(−P/1.6, −P/1.6, 3P/8) (closed form)', forces(r2),
+    [1.35 * 5 * H / 6 - 1.5 * P / 1.6, -1.35 * 5 * H / 6 - 1.5 * P / 1.6, 1.35 * H / 2 + 1.5 * 3 * P / 8], 1e-12);
+  // three cases, the generated self-weight case among them
+  const sw = TM.addSelfWeightCase(m), three = TM.addCombination(m, 'three');
+  TM.setCombinationFactor(m, three, sw, 1.35); TM.setCombinationFactor(m, three, ver, 1.5); TM.setCombinationFactor(m, three, hor, 0.9);
+  const in3 = TM.toAnalysisInput(m, { combination: three }), r3 = TM.analyzeCombination(m, three, {});
+  check('three cases with self-weight: every node gets 0.9·F_hor + 1.5·F_ver + 1.35·F_sw, in load-case order', m.nodes.every((n, i) =>
+    in3.nodes[i].fx === 0 + 0.9 * TM.nodeLoad(m, n, hor).fx + 1.5 * TM.nodeLoad(m, n, ver).fx + 1.35 * TM.nodeLoad(m, n, sw).fx &&
+    in3.nodes[i].fy === 0 + 0.9 * TM.nodeLoad(m, n, hor).fy + 1.5 * TM.nodeLoad(m, n, ver).fy + 1.35 * TM.nodeLoad(m, n, sw).fy));
+  near('... and the vertical reactions carry 1.5·P + 1.35·ΣW (ΣW = W_AC + W_BC + W_AB)', r3.nodes[0].ry + r3.nodes[1].ry, 1.5 * P + 1.35 * (W_AC + W_BC + W_AB), 1e-12);
+  near('... and the horizontal reaction carries −0.9·H', r3.nodes[0].rx, -0.9 * H, 1e-12);
+  // negative and zero factors, and cancellation
+  const neg = TM.addCombination(m, 'neg'); TM.setCombinationFactor(m, neg, ver, -1);
+  closeArray('a negative factor reverses the case: −1 × Vertical gives the opposite forces', forces(TM.analyzeCombination(m, neg, {})), forces(rV).map((x) => -x), 1e-12);
+  const zero = TM.addCombination(m, 'zero'); TM.setCombinationFactor(m, zero, hor, 1.35); TM.setCombinationFactor(m, zero, ver, 0);
+  const hOnly = TM.addCombination(m, 'h'); TM.setCombinationFactor(m, hOnly, hor, 1.35);
+  same('a zero factor contributes nothing: the same input as without the case', TM.toAnalysisInput(m, { combination: zero }), TM.toAnalysisInput(m, { combination: hOnly }));
+  const up = TM.addLoadCase(m, 'Up'); TM.setNodeLoad(m, C, 0, P, up);
+  const cancel = TM.addCombination(m, 'cancel'); TM.setCombinationFactor(m, cancel, ver, 1); TM.setCombinationFactor(m, cancel, up, 1);
+  const rc = TM.analyzeCombination(m, cancel, {});
+  check('opposite loads cancel exactly: no member forces, no reactions, SF ∞ everywhere', rc.ok && rc.members.every((x) => x.force === 0 && x.sf === Infinity) && rc.nodes.every((n) => n.rx === 0 && n.ry === 0));
+  // λ multiplies the complete combined state once
+  const in2l = TM.toAnalysisInput(m, { combination: two, loadFactor: 2 });
+  check('λ = 2 multiplies the combined loads once: 2·(1.35·H) and 2·(1.5·(−P)), not λ² or λ·γ²', in2l.nodes[2].fx === 2 * (1.35 * H) && in2l.nodes[2].fy === 2 * (1.5 * -P));
+  closeArray('λ = 2: member forces twice those at λ = 1', forces(TM.analyzeCombination(m, two, { loadFactor: 2 })), forces(r2).map((x) => 2 * x), 1e-12);
+  const r0 = TM.analyzeCombination(m, two, { loadFactor: 0 });
+  check('λ = 0: the zero-action state, no member forces or reactions', r0.ok && r0.members.every((x) => x.force === 0) && r0.nodes.every((n) => n.rx === 0 && n.ry === 0));
+  const snap = JSON.stringify(TM.serialize(m));
+  TM.toAnalysisInput(m, { combination: three }); TM.analyzeCombinations(m, { loadFactor: 1.7 });
+  check('building and solving combinations changes nothing in the model', JSON.stringify(TM.serialize(m)) === snap);
+  check('the combination reads the self-weight case as it is now: moving the apex changes its loads at once',
+    (C.y = 8, TM.nodeLoad(m, C, three).fy !== in3.nodes[2].fy) && (C.y = 4, TM.nodeLoad(m, C, three).fy === in3.nodes[2].fy));
+  void A; void B;
+});
+
+testCase('Combinations of prescribed settlements: u_s = Σ γᵢ·u_s,ᵢ along each support frame', () => {
+  const m = TM.buildExample('settlement'); // three supports; the middle one, node 5, settles −10 mm in Load case 1
+  const lc1 = m.loadCases[0], mid = m.nodes[4];
+  const settle = TM.addLoadCase(m, 'Settlement only'); TM.setNodeSettlement(m, mid, 0, -0.01, settle);
+  const lift = TM.addLoadCase(m, 'Lift'); TM.setNodeSettlement(m, mid, 0, 0.004, lift);
+  const c = TM.addCombination(m, 'S'); TM.setCombinationFactor(m, c, settle, 1); TM.setCombinationFactor(m, c, lift, 2);
+  const inp = TM.toAnalysisInput(m, { combination: c });
+  check('the combined settlement is 1·(−10 mm) + 2·(+4 mm), passed on the fixed axis', inp.nodes[4].dy === 0 + 1 * -0.01 + 2 * 0.004 && inp.nodes[4].dx === 0);
+  same('nodeSettlement reads the same combined value', TM.nodeSettlement(m, mid, c), { dx: 0, dy: 0 + 1 * -0.01 + 2 * 0.004 });
+  const r = TM.analyzeCombination(m, c, {});
+  check('the solver moves the support by exactly that amount', r.ok && r.nodes[4].uy === inp.nodes[4].dy);
+  const rs = analyse(m, { loadCase: settle }), rl = analyse(m, { loadCase: lift });
+  closeArray('this indeterminate truss: the forces equal 1·N(settlement) + 2·N(lift) (a superposition check of the direct solve)', forces(r), forces(rs).map((x, k) => x + 2 * forces(rl)[k]), 1e-9);
+  const both = TM.addCombination(m, 'loads and settlement'); TM.setCombinationFactor(m, both, lc1, 1.5); TM.setCombinationFactor(m, both, settle, 1);
+  const ib = TM.toAnalysisInput(m, { combination: both });
+  check('a case with loads and settlements, plus a settlement case: both kinds of action combine with their factors',
+    ib.nodes[4].dy === 0 + 1.5 * -0.01 + 1 * -0.01 && m.nodes.every((n, i) => ib.nodes[i].fy === 0 + 1.5 * TM.nodeLoad(m, n, lc1).fy));
+  near('λ = 2 scales the combined settlement once', TM.toAnalysisInput(m, { combination: c, loadFactor: 2 }).nodes[4].dy, 2 * (0 + 1 * -0.01 + 2 * 0.004), 1e-15);
+  // a rotated support frame: the combined settlement stays along x′, y′, and only a fixed axis passes it on
+  const t = swTruss(), B = t.B;
+  B.support = { type: 'custom', angle: 30, fixX: false, fixY: true };
+  const s1 = t.m.loadCases[0]; TM.setNodeSettlement(t.m, B, 0.002, -0.01, s1);
+  const s2 = TM.addLoadCase(t.m, 'b'); TM.setNodeSettlement(t.m, B, 0.001, 0.003, s2);
+  const cr = TM.addCombination(t.m, 'rot'); TM.setCombinationFactor(t.m, cr, s1, 2); TM.setCombinationFactor(t.m, cr, s2, -1);
+  const ir = TM.toAnalysisInput(t.m, { combination: cr });
+  check('rotated frame: dy′ = 2·(−10 mm) − 1·(3 mm) on the fixed y′ axis; the free x′ axis passes nothing', ir.nodes[1].dy === 0 + 2 * -0.01 + -1 * 0.003 && ir.nodes[1].dx === 0 && ir.nodes[1].angle === 30);
+});
+
+testCase('Each combination is solved from its complete action state, never from the cases\' safety factors', () => {
+  // Member AC (steel, 2000 mm², fy 250 MPa: N_y = 500 kN; I = 2·10⁶ mm⁴, L = 5 m: P_cr = π²·200 GPa·I/L² = 157.9 kN)
+  // "Horizontal" (H = 100 kN): N_AC = +5H/6 = +83.3 kN, SF = 500/83.3 = 6.0 (yield).
+  // "Vertical" (P = 100 kN):   N_AC = −P/1.6 = −62.5 kN, SF = 157.9/62.5 = 2.53 (buckling).
+  // 1 × Horizontal + 1 × Vertical: N_AC = 5H/6 − P/1.6 = +20.8 kN in tension, SF = 500/20.8 = 24.0 (yield).
+  const { m, hor, ver } = comboTruss();
+  const c = TM.addCombination(m, 'H + V'); TM.setCombinationFactor(m, c, hor, 1); TM.setCombinationFactor(m, c, ver, 1);
+  const rh = analyse(m, { loadCase: hor }), rv = analyse(m, { loadCase: ver }), rc = TM.analyzeCombination(m, c, {});
+  const AC = (r) => r.members[0];
+  near('Horizontal alone: AC in tension, SF 6.0 (yield)', AC(rh).sf, 6, 1e-12);
+  check('... governed by yield', AC(rh).governs === 'yield' && AC(rh).force > 0);
+  near('Vertical alone: AC in compression, SF π²·16000/62500 = 2.53 (buckling)', AC(rv).sf, Math.PI * Math.PI * 16000 / 62500, 1e-12);
+  check('... governed by buckling', AC(rv).governs === 'buckling' && AC(rv).force < 0);
+  near('the combination solved directly: AC carries 5H/6 − P/1.6 = +20.83 kN (closed form)', AC(rc).force, 5 * H / 6 - P / 1.6, 1e-12);
+  near('... so its SF is 500 kN / 20.83 kN = 24.0, governed by yield in tension', AC(rc).sf, 24, 1e-12);
+  check('... and that is the result of the solver for the combined actions', AC(rc).governs === 'yield' && AC(rc).state === 'tension');
+  const sumOfUtilisations = 1 / (1 / AC(rh).sf + 1 / AC(rv).sf), worstOfCases = Math.min(AC(rh).sf, AC(rv).sf);
+  check('adding the cases\' utilisations would give SF 1.78, and taking the worse case 2.53: neither is the combination\'s 24.0',
+    Math.abs(sumOfUtilisations - 1.778) < 0.001 && Math.abs(worstOfCases - 2.527) < 0.001 && AC(rc).sf > 9 * worstOfCases);
+  const hand = { nodes: TM.toAnalysisInput(m, { loadCase: hor }).nodes.map((n, i) => Object.assign({}, n, { fx: 0 + 1 * n.fx + 1 * TM.toAnalysisInput(m, { loadCase: ver }).nodes[i].fx, fy: 0 + 1 * n.fy + 1 * TM.toAnalysisInput(m, { loadCase: ver }).nodes[i].fy })),
+    members: TM.toAnalysisInput(m).members, options: {} };
+  const rHand = FEA.analyze(hand);
+  check('analyzeCombination gives exactly FEA.analyze() of the hand-combined loads', rc.members.every((x, k) => Object.is(x.force, rHand.members[k].force) && Object.is(x.sf, rHand.members[k].sf)));
+  near('BC, in compression in both cases, buckles under the combination: SF = P_cr,BC / (5H/6 + P/1.6)', rc.members[1].sf, Math.PI * Math.PI * 68.9e9 * 1e-6 / 25 / (5 * H / 6 + P / 1.6), 1e-12);
+  check('... a failure the solver reports for the combined state', rc.members[1].status === 'buckled' && rc.summary.minSF.member === 1);
+});
+
+testCase('Non-active combinations, independent results and the worst case over combinations', () => {
+  const { m, hor, ver } = comboTruss();
+  const a = TM.addCombination(m, 'A'); TM.setCombinationFactor(m, a, hor, 1); TM.setCombinationFactor(m, a, ver, 1);
+  const b = TM.addCombination(m, 'B'); TM.setCombinationFactor(m, b, ver, 1.5);
+  const c = TM.addCombination(m, 'C'); TM.setCombinationFactor(m, c, hor, -1); TM.setCombinationFactor(m, c, ver, 0.5);
+  const quiet = analyse(m), snap = JSON.stringify(TM.serialize(m));
+  const rb = TM.analyzeCombination(m, b, {});
+  check('a combination that is not active is solved on request, and nothing in the model changes', m.activeCombination === null && JSON.stringify(TM.serialize(m)) === snap);
+  TM.setActiveCombination(m, b);
+  const rbActive = analyse(m, { loadFactor: 1 });
+  check('... with exactly the results it has when it is the active state', rbActive.members.every((x, k) => Object.is(x.force, rb.members[k].force)));
+  TM.setActiveLoadCase(m, hor);
+  check('the load case results are unaffected by the combinations', analyse(m).members.every((x, k) => Object.is(x.force, quiet.members[k].force)));
+  const runs = TM.analyzeCombinations(m, { loadFactor: 1 });
+  check('analyzeCombinations solves every combination, each with its own complete result', runs.length === 3 && runs.map((x) => x.combination).join() === [a, b, c].join() &&
+    new Set(runs.map((x) => x.result)).size === 3 && runs.every((x) => x.result.ok && x.result.members.length === 3 && x.result.nodes.length === 3));
+  check('... equal to solving each one alone', runs.every((x) => x.result.members.every((mm, k) => Object.is(mm.force, TM.analyzeCombination(m, x.combination, {}).members[k].force))));
+  const keepB = runs[1].result.members[0].force;
+  runs[0].result.members[0].force = 12345;
+  check('the results are independent: changing one result object leaves the others as they were', runs[1].result.members[0].force === keepB && runs[2].result.members[0].force !== 12345);
+  const env = TM.combinationEnvelope(m, TM.analyzeCombinations(m, {}));
+  const fresh = TM.analyzeCombinations(m, {});
+  const lowest = fresh.reduce((w, x) => (!w || x.result.summary.minSF.value < w.result.summary.minSF.value ? x : w), null);
+  check('the governing value is the lowest SF of any member in any combination, with that combination and member',
+    env.governing.value === lowest.result.summary.minSF.value && env.governing.combination === lowest.combination && env.governing.member === lowest.result.summary.minSF.member && env.complete);
+  // BC: A gives −5H/6 − P/1.6 = −145.8 kN, B gives −1.5·P/1.6 = −93.75 kN, C gives +5H/6 − 0.5·P/1.6 (tension)
+  check('... A (1 × Horizontal + 1 × Vertical) governs: BC buckles under 145.8 kN compression, more than B\'s 93.75 kN', env.governing.combination === a && env.governing.member === 1 && env.governing.governs === 'buckling');
+  check('per member, the lowest SF is taken from one combination\'s own result, never a sum', env.members.every((x, k) => fresh.some((f) => f.combination === x.minSF.combination && f.result.members[k].sf === x.minSF.value) &&
+    fresh.every((f) => f.result.members[k].sf >= x.minSF.value)));
+  check('largest tension and compression of AC come from the combination that produces them (C reverses H: compression)',
+    env.members[0].maxTension.combination === a && env.members[0].maxCompression.combination === c &&
+    env.members[0].maxCompression.value === fresh[2].result.members[0].force);
+  const mech = TM.buildExample('mechanism'), mc = TM.addCombination(mech, 'M'); TM.setCombinationFactor(mech, mc, mech.loadCases[0], 1.5);
+  const menv = TM.combinationEnvelope(mech, TM.analyzeCombinations(mech, {}));
+  check('a mechanism stays unstable in every combination: no governing value, and the envelope is not complete',
+    !TM.analyzeCombination(mech, mc, {}).ok && menv.governing === null && menv.unsolved.length === 1 && !menv.complete);
+  const none = TM.combinationEnvelope(m, []);
+  check('no combinations: no governing value, and nothing is claimed as complete', none.governing === null && !none.complete);
+});
+
+testCase('Combination warnings', () => {
+  const { m, hor, ver } = comboTruss();
+  const empty = TM.addCombination(m, 'Empty');
+  same('a combination without load cases has no actions, and a warning says so', TM.validateModel(m).map((w) => w.msg), ['Combination "Empty" has no load cases, so it has no actions.']);
+  TM.setCombinationFactor(m, empty, hor, 0); TM.setCombinationFactor(m, empty, ver, 0);
+  same('every factor 0: no actions either', TM.validateModel(m).map((w) => w.msg), ['Combination "Empty": every factor is 0, so it has no actions.']);
+  TM.setCombinationFactor(m, empty, ver, 1.2);
+  check('one non-zero factor is enough: no warning', TM.validateModel(m).length === 0);
+});
+
+testCase('Combinations are saved, read and restored, and malformed ones are reported', () => {
+  const { m, hor, ver } = comboTruss();
+  const sw = TM.addSelfWeightCase(m);
+  const c1 = TM.addCombination(m, 'ULS 1'); TM.setCombinationFactor(m, c1, sw, 1.35); TM.setCombinationFactor(m, c1, ver, 1.5);
+  const c2 = TM.addCombination(m, 'Uplift'); TM.setCombinationFactor(m, c2, sw, 1); TM.setCombinationFactor(m, c2, hor, -0.75); TM.setCombinationFactor(m, c2, ver, 0);
+  TM.setActiveCombination(m, c2);
+  const f = TM.serialize(m);
+  same('combinations are written with ids, and their terms name load cases by id, in load-case order', f.combinations, [
+    { id: 1, name: 'ULS 1', terms: [{ loadCase: 2, factor: 1.5 }, { loadCase: 3, factor: 1.35 }] },
+    { id: 2, name: 'Uplift', terms: [{ loadCase: 1, factor: -0.75 }, { loadCase: 2, factor: 0 }, { loadCase: 3, factor: 1 }] }]);
+  check('the analysed combination is named by id, and the active load case is kept', f.activeCombination === 2 && f.activeLoadCase === 1);
+  const r = TM.readModel(copy(f));
+  check('read back: the same file, without notes', JSON.stringify(TM.serialize(r.model)) === JSON.stringify(f) && r.notes.length === 0);
+  check('... with the terms linked to the model\'s own load cases, the generated case included', r.model.combinations[0].terms[1].loadCase === r.model.loadCases[2] && TM.isGeneratedCase(r.model.combinations[0].terms[1].loadCase));
+  check('... and the same combination analysed', r.model.activeCombination === r.model.combinations[1] && r.model.activeCase === r.model.loadCases[0]);
+  const rr = analyse(r.model), rm = analyse(m);
+  check('... giving exactly the same results', rr.members.every((x, k) => Object.is(x.force, rm.members[k].force)));
+  const rep = TM.readModel({ meta: { loadFactor: 1 }, model: copy(f), status: 'solved' });
+  check('a report file keeps its combinations', rep.model.combinations.length === 2 && rep.model.activeCombination === rep.model.combinations[1]);
+  const K = TM.SESSION_KEYS, st = fakeStorage();
+  const sv = TM.saveStoredSession(st, K, { model: m, settings: { grid: 1 }, view: { zoom: 3 } }, { migrationPending: false, corruptV2: null });
+  const L = TM.loadStoredSession(st, K);
+  check('an autosaved session keeps them: saved and verified, then restored with the same analysed combination',
+    sv.saved && L.source === 'v2' && L.model.combinations.length === 2 && L.model.activeCombination === L.model.combinations[1] && JSON.stringify(TM.serialize(L.model)) === JSON.stringify(f));
+  const undone = TM.deserialize(JSON.parse(JSON.stringify({ model: f })).model);
+  check('an undo snapshot (the serialised model) restores them too', undone.combinations.length === 2 && JSON.stringify(TM.serialize(undone)) === JSON.stringify(f));
+  const older = copy(f); delete older.combinations; delete older.activeCombination;
+  const ro = TM.readModel(older);
+  check('a file from before milestone 5 reads with no combinations and no note', ro.model.combinations.length === 0 && ro.model.activeCombination === null && ro.notes.length === 0);
+  check('... and so does every version 1 file', TM.readModel(copy(V1_FILE)).model.combinations.length === 0);
+  const read = (edit) => { const g = copy(f); edit(g); return TM.readModel(g); };
+  for (const [what, edit, pattern] of [
+    ['combinations that are not a list', (g) => { g.combinations = {}; }, /"combinations" must be a list/],
+    ['a combination that is not an object', (g) => { g.combinations[0] = 3; }, /combination 1 is not an object/],
+    ['an id that is not a positive integer', (g) => { g.combinations[1].id = 0; }, /combination 2 has an invalid id/],
+    ['a text id', (g) => { g.combinations[0].id = '1'; }, /combination 1 has an invalid id/],
+    ['two combinations with the same id', (g) => { g.combinations[1].id = 1; }, /two combinations have the id 1/]]) {
+    throws(`${what}: the file is refused with a clear message`, () => read(edit), pattern);
+  }
+  const miss = read((g) => { g.combinations[0].terms[0].loadCase = 9; });
+  check('a term naming a load case the file does not have is skipped, and a note says so',
+    miss.model.combinations[0].terms.length === 1 && miss.notes.length === 1 && /Combination "ULS 1", term 1: load case 9 does not exist/.test(miss.notes[0].msg), JSON.stringify(miss.notes));
+  for (const bad of [null, 'abc', true, [], '1e999', undefined, {}]) {
+    const rb = read((g) => { if (bad === undefined) delete g.combinations[1].terms[0].factor; else g.combinations[1].terms[0].factor = bad; });
+    check(`an invalid factor (${JSON.stringify(bad)}) skips the term, with a note`, rb.model.combinations[1].terms.length === 2 && rb.notes.length === 1 && /is not a finite number, so the term was skipped/.test(rb.notes[0].msg), JSON.stringify(rb.notes));
+  }
+  const text = read((g) => { g.combinations[1].terms[0].factor = ' -0.75 '; });
+  check('a factor written as text is read as the number', text.model.combinations[1].terms[0].factor === -0.75 && text.notes.length === 0);
+  const dup = read((g) => { g.combinations[0].terms.push({ loadCase: 2, factor: 9 }); });
+  check('a load case listed twice in one combination: the first factor is kept, the second skipped with a note',
+    TM.combinationFactor(dup.model.combinations[0], dup.model.loadCases[1]) === 1.5 && dup.notes.length === 1 && /already has a factor in this combination/.test(dup.notes[0].msg));
+  const order = read((g) => { g.combinations[0].terms.reverse(); });
+  check('terms in another order are read into load-case order', order.model.combinations[0].terms.map((t) => order.model.loadCases.indexOf(t.loadCase)).join() === '1,2' && order.notes.length === 0);
+  const notList = read((g) => { g.combinations[0].terms = 'x'; });
+  check('terms that are not a list: the combination is kept, empty, with a note', notList.model.combinations[0].terms.length === 0 && notList.notes.length === 1);
+  const badTerm = read((g) => { g.combinations[0].terms[0] = 7; });
+  check('a term that is not an object is skipped, with a note', badTerm.model.combinations[0].terms.length === 1 && /term 1: not an object/.test(badTerm.notes[0].msg));
+  const act = read((g) => { g.activeCombination = 5; });
+  check('an active combination that does not exist: the active load case is shown, with a note', act.model.activeCombination === null && act.notes.length === 1 && /combination 5 as active, which does not exist/.test(act.notes[0].msg));
+  const actNone = read((g) => { delete g.combinations; });
+  check('an active combination in a file without combinations: a note', actNone.model.activeCombination === null && actNone.notes.length === 1 && /has no combinations/.test(actNone.notes[0].msg));
+  const names = read((g) => { g.combinations[0].name = '  '; g.combinations[1].name = '  ' + 'x'.repeat(100); });
+  same('names are trimmed and cut to 80 characters; an empty name becomes "Combination N"', names.model.combinations.map((c) => c.name), ['Combination 1', 'x'.repeat(80)]);
+  const noCases = read((g) => { delete g.loadCases; });
+  check('with the load cases missing, every term is reported, none silently dropped', noCases.model.combinations.every((c) => c.terms.length === 0) && noCases.notes.filter((n) => /does not exist, so the term was skipped/.test(n.msg)).length === 5);
+});
+
+testCase('Combinations on the nine examples', () => {
+  for (const [key] of TM.EXAMPLES) {
+    const m = TM.buildExample(key), lc1 = m.loadCases[0], base = analyse(m);
+    const unit = TM.addCombination(m, '1 × Load case 1'); TM.setCombinationFactor(m, unit, lc1, 1);
+    const ru = TM.analyzeCombination(m, unit, { loadFactor: 1, targetSF: 1.5 });
+    check(`${key}: 1 × "Load case 1" gives exactly the results of the case`, ru.ok === base.ok &&
+      (!base.ok || (ru.members.every((x, k) => Object.is(x.force, base.members[k].force) && Object.is(x.sf, base.members[k].sf)) && ru.nodes.every((n, i) => Object.is(n.ry, base.nodes[i].ry)))));
+    const sw = TM.addSelfWeightCase(m), uls = TM.addCombination(m, 'ULS'); TM.setCombinationFactor(m, uls, sw, 1.35); TM.setCombinationFactor(m, uls, lc1, 1.5);
+    const inp = TM.toAnalysisInput(m, { combination: uls }), r = TM.analyzeCombination(m, uls, {});
+    check(`${key}: 1.5 × Load case 1 + 1.35 × self-weight: the input is the factored sum at every node`, m.nodes.every((n, i) =>
+      inp.nodes[i].fy === 0 + 1.5 * TM.nodeLoad(m, n, lc1).fy + 1.35 * TM.nodeLoad(m, n, sw).fy && inp.nodes[i].fx === 0 + 1.5 * TM.nodeLoad(m, n, lc1).fx + 1.35 * TM.nodeLoad(m, n, sw).fx &&
+      inp.nodes[i].dy === (n.support.fixY || TM.supportRestraint(n.support).fixY ? 0 + 1.5 * TM.nodeSettlement(m, n, lc1).dy : 0)));
+    if (key === 'mechanism') { check('mechanism: every combination is still unstable, so no results', !r.ok && !ru.ok); continue; }
+    const Fx = inp.nodes.reduce((t, n) => t + n.fx, 0), Fy = inp.nodes.reduce((t, n) => t + n.fy, 0);
+    const scale = Math.max(...inp.nodes.map((n) => Math.hypot(n.fx, n.fy)));
+    check(`${key}: the combination solves, and the reactions balance the combined loads (ΣR + ΣF = 0)`,
+      r.ok && Math.abs(r.nodes.reduce((t, n) => t + n.rx, 0) + Fx) < 1e-9 * scale && Math.abs(r.nodes.reduce((t, n) => t + n.ry, 0) + Fy) < 1e-9 * scale);
+    check(`${key}: "Load case 1" is unchanged by the combinations`, analyse(m).members.every((x, k) => Object.is(x.force, base.members[k].force)));
+  }
 });
 
 out('');

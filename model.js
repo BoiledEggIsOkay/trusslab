@@ -159,7 +159,8 @@
     const steel = makeMaterial('steel'), alu = makeMaterial('aluminum'), fir = makeMaterial('fir');
     const g = makeGroup('Default: A 2000 mm²', steel, { type: 'custom' }, GROUP_COLORS[0], 2000 * MM2, 2.0e6 * MM4);
     const lc = makeLoadCase('Load case 1');
-    return { title: title || 'Untitled truss', nodes: [], members: [], materials: [steel, alu, fir], groups: [g], loadCases: [lc], activeCase: lc };
+    return { title: title || 'Untitled truss', nodes: [], members: [], materials: [steel, alu, fir], groups: [g], loadCases: [lc], activeCase: lc,
+      combinations: [], activeCombination: null };
   }
 
   const SUPPORT_TYPES = [
@@ -200,7 +201,8 @@
   const supportRestraint = (s) => ({ fixX: !!s.fixX, fixY: !!s.fixY, angle: s.angle || 0 });
 
   /* ---------- load cases: nodal loads and prescribed settlements ---------- */
-  const caseOf = (model, lc) => lc || model.activeCase;
+  // The action state that reading defaults to: the active combination when one is chosen, otherwise the active case.
+  const caseOf = (model, lc) => lc || model.activeCombination || model.activeCase;
 
   /* ---------- self-weight (milestone 4): a generated dead-load case ---------- */
   /** Standard gravity in m/s² (the conventional value, exact by definition), used in W = ρ·A·L·g. */
@@ -238,10 +240,18 @@
     }
     return out;
   }
-  /** The loads of a load case (default: the active one): its own entries, or for the self-weight case those computed now. */
+  /**
+   * The nodal loads of a load case or combination (default: the active state): a case's own entries, for the
+   * self-weight case those computed now, and for a combination Σ γᵢ·Fᵢ computed now from its cases.
+   */
   function caseLoads(model, lc) {
     const c = caseOf(model, lc);
-    return isGeneratedCase(c) ? selfWeightLoads(model) : c.loads;
+    return isCombination(c) ? combinationLoads(model, c) : isGeneratedCase(c) ? selfWeightLoads(model) : c.loads;
+  }
+  /** The prescribed settlements of a load case or combination (default: the active state); Σ γᵢ·u_s,ᵢ for a combination. */
+  function caseSettlements(model, lc) {
+    const c = caseOf(model, lc);
+    return isCombination(c) ? combinationSettlements(model, c) : c.settlements;
   }
   const selfWeightCase = (model) => model.loadCases.find(isGeneratedCase) || null;
   /** Adds the generated self-weight case, which does not become active. A model has at most one: if it already has it, that one is returned. */
@@ -270,30 +280,115 @@
       materials: model.materials.filter((m) => without.has(m)), complete: missing.length === 0 };
   }
 
+  /* ---------- load combinations (milestone 5) ---------- */
+  /**
+   * A load combination: factors γ on load cases, `terms: [{ loadCase, factor }]` kept in load-case order. Its actions
+   * are F = Σ γᵢ·Fᵢ and u_s = Σ γᵢ·u_s,ᵢ (the self-weight case included like any case), built whenever they are read,
+   * and analysed as one complete action state (toAnalysisInput, analyzeCombination): results are never added up.
+   * A factor is any finite number: a negative one reverses a case, and 0 keeps the case listed without effect.
+   */
+  const isCombination = (x) => !!x && Array.isArray(x.terms);
+  const validFactor = (v) => typeof v === 'number' && Number.isFinite(v);
+  function makeCombination(name) {
+    return { uid: newUid(), name: name || 'Combination 1', terms: [] };
+  }
+  function nextCombinationName(model) {
+    const names = new Set(model.combinations.map((c) => c.name));
+    let k = model.combinations.length + 1;
+    while (names.has(`Combination ${k}`)) k++;
+    return `Combination ${k}`;
+  }
+  /** Adds an empty combination ("Combination N") and returns it; it does not become active. */
+  function addCombination(model, name) {
+    const c = makeCombination(name || nextCombinationName(model));
+    model.combinations.push(c);
+    return c;
+  }
+  /** Removes a combination. If it was active, the active load case is shown again. */
+  function removeCombination(model, comb) {
+    const i = model.combinations.indexOf(comb);
+    if (i < 0) return false;
+    model.combinations.splice(i, 1);
+    if (model.activeCombination === comb) model.activeCombination = null;
+    return true;
+  }
+  /** Makes a combination the analysed state, or with null goes back to the active load case. */
+  function setActiveCombination(model, comb) {
+    model.activeCombination = comb && model.combinations.includes(comb) ? comb : null;
+    return model.activeCombination;
+  }
+  /** The factor γ of a load case in a combination, or null when the case is not in it. */
+  function combinationFactor(comb, lc) {
+    const t = comb.terms.find((x) => x.loadCase === lc);
+    return t ? t.factor : null;
+  }
+  const sortTerms = (model, comb) => comb.terms.sort((a, b) => model.loadCases.indexOf(a.loadCase) - model.loadCases.indexOf(b.loadCase));
+  /**
+   * Sets the factor of a load case in a combination (null or undefined removes the case from it). Returns false,
+   * changing nothing, for a factor that is not a finite number or a case or combination that is not in the model.
+   */
+  function setCombinationFactor(model, comb, lc, factor) {
+    if (!model.combinations.includes(comb) || !model.loadCases.includes(lc)) return false;
+    const i = comb.terms.findIndex((x) => x.loadCase === lc);
+    if (factor === null || factor === undefined) { if (i >= 0) comb.terms.splice(i, 1); return true; }
+    if (!validFactor(factor)) return false;
+    if (i >= 0) comb.terms[i].factor = factor;
+    else { comb.terms.push({ loadCase: lc, factor }); sortTerms(model, comb); }
+    return true;
+  }
+  /** F = Σ γᵢ·Fᵢ: the combination's nodal loads, summed in load-case order, as Map(node → { fx, fy }). */
+  function combinationLoads(model, comb) {
+    const out = new Map();
+    for (const t of comb.terms) {
+      for (const [n, v] of caseLoads(model, t.loadCase)) {
+        const p = out.get(n);
+        out.set(n, { fx: (p ? p.fx : 0) + t.factor * v.fx, fy: (p ? p.fy : 0) + t.factor * v.fy });
+      }
+    }
+    return out;
+  }
+  /** u_s = Σ γᵢ·u_s,ᵢ: the combination's settlements along each support's x′, y′, as Map(node → { dx, dy }). */
+  function combinationSettlements(model, comb) {
+    const out = new Map();
+    for (const t of comb.terms) {
+      for (const [n, v] of t.loadCase.settlements) {
+        const p = out.get(n);
+        out.set(n, { dx: (p ? p.dx : 0) + t.factor * v.dx, dy: (p ? p.dy : 0) + t.factor * v.dy });
+      }
+    }
+    return out;
+  }
+  /** What is analysed and shown: the active combination when one is chosen, otherwise the active load case. */
+  const activeTarget = (model) => caseOf(model);
+
   /** Nodal load { fx, fy } in N on `node` in load case `lc` (default: the active case); generated in the self-weight case. */
   function nodeLoad(model, node, lc) {
     const v = caseLoads(model, lc).get(node);
     return v ? { fx: v.fx, fy: v.fy } : { fx: 0, fy: 0 };
   }
-  /** Sets a nodal load; a zero load removes the entry. Returns false, changing nothing, in the generated self-weight case. */
+  /**
+   * Sets a nodal load; a zero load removes the entry. Returns false, changing nothing, in the generated self-weight
+   * case and in a combination (including the active one, the default): their loads are never entered by hand.
+   */
   function setNodeLoad(model, node, fx, fy, lc) {
     const c = caseOf(model, lc);
-    if (isGeneratedCase(c)) return false;
+    if (isGeneratedCase(c) || isCombination(c)) return false;
     if (fx === 0 && fy === 0) c.loads.delete(node); else c.loads.set(node, { fx, fy });
     return true;
   }
   /** Prescribed settlement { dx, dy } in m along the support frame axes x′, y′ (rotated by the support angle). */
   function nodeSettlement(model, node, lc) {
-    const v = caseOf(model, lc).settlements.get(node);
+    const v = caseSettlements(model, lc).get(node);
     return v ? { dx: v.dx, dy: v.dy } : { dx: 0, dy: 0 };
   }
   /**
    * Sets a prescribed settlement; zero removes the entry. A value on an axis that is not fixed is kept but has no
-   * effect. Returns false, changing nothing, in the generated self-weight case (it holds no settlements).
+   * effect. Returns false, changing nothing, in the generated self-weight case (it holds no settlements) and in a
+   * combination.
    */
   function setNodeSettlement(model, node, dx, dy, lc) {
     const c = caseOf(model, lc);
-    if (isGeneratedCase(c)) return false;
+    if (isGeneratedCase(c) || isCombination(c)) return false;
     if (dx === 0 && dy === 0) c.settlements.delete(node); else c.settlements.set(node, { dx, dy });
     return true;
   }
@@ -309,16 +404,21 @@
     model.loadCases.push(lc);
     return lc;
   }
-  /** Removes a load case, never the last one. If it was active, a neighbouring case becomes active. */
+  /**
+   * Removes a load case, never the last one. If it was active, a neighbouring case becomes active. Its factors are
+   * removed from every combination, which then combine the remaining cases.
+   */
   function removeLoadCase(model, lc) {
     const i = model.loadCases.indexOf(lc);
     if (i < 0 || model.loadCases.length <= 1) return false;
     model.loadCases.splice(i, 1);
+    for (const c of model.combinations || []) c.terms = c.terms.filter((t) => t.loadCase !== lc);
     if (model.activeCase === lc) model.activeCase = model.loadCases[Math.min(i, model.loadCases.length - 1)];
     return true;
   }
+  /** Makes a load case active: the one loads are entered in and, with no combination chosen, the one analysed. */
   function setActiveLoadCase(model, lc) {
-    if (model.loadCases.includes(lc)) model.activeCase = lc;
+    if (model.loadCases.includes(lc)) { model.activeCase = lc; model.activeCombination = null; }
     return model.activeCase;
   }
   /** Deletes the loads and settlements of the given nodes from every load case (used when nodes are deleted). */
@@ -352,6 +452,10 @@
         ? { id: i + 1, name: lc.name, generated: SELF_WEIGHT, loads: [], settlements: [] }
         : { id: i + 1, name: lc.name, loads: entries(lc.loads, 'fx', 'fy'), settlements: entries(lc.settlements, 'dx', 'dy') })),
       activeLoadCase: model.loadCases.indexOf(model.activeCase) + 1,
+      // milestone 5: combinations refer to load cases by id; null when no combination is the analysed state
+      combinations: (model.combinations || []).map((c, i) => ({ id: i + 1, name: c.name,
+        terms: c.terms.filter((t) => model.loadCases.includes(t.loadCase)).map((t) => ({ loadCase: model.loadCases.indexOf(t.loadCase) + 1, factor: t.factor })) })),
+      activeCombination: model.activeCombination && (model.combinations || []).includes(model.activeCombination) ? model.combinations.indexOf(model.activeCombination) + 1 : null,
     };
   }
 
@@ -372,7 +476,7 @@
     const fromVersion = Number(obj.version) === 2 ? 2 : 1;
     const notes = [];
     const model = readStructure(obj, notes);
-    if (fromVersion === 2) readLoadCasesV2(obj, model, notes); else migrateV1(obj, model, notes);
+    if (fromVersion === 2) { readLoadCasesV2(obj, model, notes); readCombinationsV2(obj, model, notes); } else migrateV1(obj, model, notes);
     return { model, fromVersion, notes };
   }
   /** readModel without the notes (the interface script.js and window.TrussLab have always used). */
@@ -427,7 +531,8 @@
       return makeMember(a, b, groups[fin(e.section !== undefined ? e.section : e.group, 1) - 1] || groups[0]);
     });
     const lc = makeLoadCase('Load case 1');
-    return { title: String(obj.title || 'Imported truss').slice(0, 120), nodes, members, materials, groups, loadCases: [lc], activeCase: lc };
+    return { title: String(obj.title || 'Imported truss').slice(0, 120), nodes, members, materials, groups, loadCases: [lc], activeCase: lc,
+      combinations: [], activeCombination: null };
   }
 
   /**
@@ -504,6 +609,52 @@
     model.activeCase = model.loadCases[a >= 0 ? a : 0];
     if (a < 0) notes.push({ msg: `The file names load case ${JSON.stringify(obj.activeLoadCase)} as active, which does not exist, so "${model.activeCase.name}" is active.` });
   }
+  /**
+   * Combinations (milestone 5, optional in version 2). Structural faults reject the file, as for load cases: a list
+   * that is not a list, a combination that is not an object, an invalid or repeated id. A term is skipped, with a
+   * note, when it is not an object, names a load case the file does not have, has a factor that is not a finite
+   * number, or repeats a case already in the combination (the first wins). Nothing is dropped without a note.
+   */
+  function readCombinationsV2(obj, model, notes) {
+    const list = obj.combinations, active = obj.activeCombination;
+    if (list === undefined || list === null) {
+      if (active !== undefined && active !== null) notes.push({ msg: `The file names combination ${JSON.stringify(active).slice(0, 40)} as active but has no combinations, so "${model.activeCase.name}" is shown.` });
+      return;
+    }
+    if (!Array.isArray(list)) throw new Error('"combinations" must be a list');
+    const ids = new Set();
+    list.forEach((c, k) => {
+      if (!c || typeof c !== 'object') throw new Error(`combination ${k + 1} is not an object`);
+      if (!Number.isInteger(c.id) || c.id < 1) throw new Error(`combination ${k + 1} has an invalid id (${JSON.stringify(c.id)})`);
+      if (ids.has(c.id)) throw new Error(`two combinations have the id ${c.id}`);
+      ids.add(c.id);
+    });
+    // the load cases as the file numbered them (their ids were checked by readLoadCasesV2)
+    const caseById = new Map();
+    if (Array.isArray(obj.loadCases) && obj.loadCases.length === model.loadCases.length) obj.loadCases.forEach((c, k) => caseById.set(c.id, model.loadCases[k]));
+    model.combinations = list.map((c, k) => {
+      const name = typeof c.name === 'string' && c.name.trim() ? c.name.trim().slice(0, 80) : `Combination ${k + 1}`;
+      const comb = makeCombination(name);
+      if (c.terms === undefined) return comb;
+      if (!Array.isArray(c.terms)) { notes.push({ msg: `Combination "${name}": its load cases are not a list, so it has none.` }); return comb; }
+      c.terms.forEach((t, j) => {
+        const at = `Combination "${name}", term ${j + 1}`;
+        if (!t || typeof t !== 'object') { notes.push({ msg: `${at}: not an object, so it was skipped.` }); return; }
+        const lc = Number.isInteger(t.loadCase) ? caseById.get(t.loadCase) : undefined;
+        if (!lc) { notes.push({ msg: `${at}: load case ${JSON.stringify(t.loadCase)} does not exist, so the term was skipped.` }); return; }
+        const f = typeof t.factor === 'number' ? t.factor : typeof t.factor === 'string' && t.factor.trim() !== '' ? +t.factor : NaN;
+        if (!validFactor(f)) { notes.push({ msg: `${at} ("${lc.name}"): the factor ${JSON.stringify(t.factor === undefined ? null : t.factor).slice(0, 40)} is not a finite number, so the term was skipped.` }); return; }
+        if (comb.terms.some((x) => x.loadCase === lc)) { notes.push({ msg: `${at}: "${lc.name}" already has a factor in this combination, so this one was skipped.` }); return; }
+        comb.terms.push({ loadCase: lc, factor: f });
+      });
+      sortTerms(model, comb);
+      return comb;
+    });
+    if (active === undefined || active === null) return;
+    const a = list.findIndex((c) => c.id === active);
+    if (a >= 0) model.activeCombination = model.combinations[a];
+    else notes.push({ msg: `The file names combination ${JSON.stringify(active).slice(0, 40)} as active, which does not exist, so "${model.activeCase.name}" is shown.` });
+  }
   const entryNum = (v) => (v === undefined ? 0 : v === null || v === '' ? NaN : +v);
   function readEntries(list, a, b, into, model, notes, where) {
     if (list === undefined) return;
@@ -526,8 +677,9 @@
   /**
    * Model checks that the solver does not make. Returns warnings { msg, ref } for: a custom support with no
    * fixed axis (it provides no restraint), a settlement on an axis that is not fixed, a settlement on a
-   * node that no member connects (both have no effect), and, when there is a self-weight case, a material
-   * without density used by members (they carry no weight).
+   * node that no member connects (both have no effect), when there is a self-weight case, a material
+   * without density used by members (they carry no weight), and a combination without any action (no load
+   * cases, or every factor 0).
    */
   function validateModel(model) {
     const warnings = [];
@@ -559,6 +711,10 @@
         if (k) warnings.push({ msg: `Material "${mat.name}" has no density, so ${k > 1 ? `its ${k} members carry` : 'its member carries'} no weight in "${sw.name}".` });
       });
     }
+    (model.combinations || []).forEach((c) => {
+      if (!c.terms.length) warnings.push({ msg: `Combination "${c.name}" has no load cases, so it has no actions.` });
+      else if (c.terms.every((t) => t.factor === 0)) warnings.push({ msg: `Combination "${c.name}": every factor is 0, so it has no actions.` });
+    });
     return warnings;
   }
 
@@ -702,27 +858,68 @@
   const ZERO_LOAD = Object.freeze({ fx: 0, fy: 0 }), ZERO_SETTLEMENT = Object.freeze({ dx: 0, dy: 0 });
   /**
    * Builds the input for FEA.analyze() from a model. It never changes the model: every object it returns
-   * is new. The load factor λ (opts.loadFactor, default 1) multiplies every action of the load case
-   * (opts.loadCase, default the active case): nodal loads and prescribed settlements alike. A settlement is
-   * passed along the support frame axes x′, y′, and only on a fixed axis. The model is linear, so
-   * u(λ) = λ·u(1); λ = 0 is the zero-action state. opts.targetSF is passed to the solver when given.
+   * is new. It analyses one action state: opts.combination, else opts.loadCase, else the active state (the
+   * active combination, or the active case). A combination's actions are F = Σ γᵢ·Fᵢ and u_s = Σ γᵢ·u_s,ᵢ.
+   * The load factor λ (opts.loadFactor, default 1) then multiplies every action of that state once: nodal
+   * loads and prescribed settlements alike, so a combination gives λ·Σ γᵢ·Fᵢ. A settlement is passed along the
+   * support frame axes x′, y′, and only on a fixed axis. The model is linear, so u(λ) = λ·u(1); λ = 0 is the
+   * zero-action state. opts.targetSF is passed to the solver when given.
    */
   function toAnalysisInput(model, opts) {
     const o = opts || {};
     const lf = o.loadFactor === undefined ? 1 : o.loadFactor;
-    const lc = o.loadCase || model.activeCase;
-    const loads = caseLoads(model, lc); // for the self-weight case, computed now from the members
+    const lc = o.combination || o.loadCase || caseOf(model);
+    const loads = caseLoads(model, lc); // the self-weight case and combinations: computed now
+    const settlements = caseSettlements(model, lc);
     const idx = new Map(model.nodes.map((n, i) => [n, i]));
     const options = {};
     if (o.targetSF !== undefined) options.targetSF = o.targetSF;
     return {
       nodes: model.nodes.map((n) => {
-        const L = loads.get(n) || ZERO_LOAD, S = lc.settlements.get(n) || ZERO_SETTLEMENT, r = supportRestraint(n.support);
+        const L = loads.get(n) || ZERO_LOAD, S = settlements.get(n) || ZERO_SETTLEMENT, r = supportRestraint(n.support);
         return { x: n.x, y: n.y, fx: L.fx * lf, fy: L.fy * lf, fixX: r.fixX, fixY: r.fixY, angle: r.angle, dx: r.fixX ? S.dx * lf : 0, dy: r.fixY ? S.dy * lf : 0 };
       }),
       members: model.members.map((e) => ({ i: idx.get(e.n1), j: idx.get(e.n2), E: e.group.material.E, A: e.group.A, I: e.group.I, fy: e.group.material.fy })),
       options,
     };
+  }
+
+  /**
+   * Solves one combination directly: FEA.analyze() on its complete action state λ·Σ γᵢ·Fᵢ, λ·Σ γᵢ·u_s,ᵢ. It works
+   * for any combination, active or not, and changes nothing in the model. opts: { loadFactor, targetSF }.
+   */
+  function analyzeCombination(model, comb, opts) {
+    return FEA.analyze(toAnalysisInput(model, Object.assign({}, opts, { combination: comb, loadCase: undefined })));
+  }
+  /** Every combination, each solved on its own: [{ combination, result }], with one complete result per combination. */
+  function analyzeCombinations(model, opts) {
+    return model.combinations.map((c) => ({ combination: c, result: analyzeCombination(model, c, opts) }));
+  }
+  /**
+   * The worst governing values over the combinations' results (design-conventions §3): for every member its lowest
+   * SF, its largest tension and its largest compression, each with the combination that produces it, and the lowest
+   * SF of all. Every value is read from one combination's own result; nothing is added, averaged or otherwise combined
+   * across combinations. A combination that could not be solved (unstable or invalid) is listed in `unsolved`: then no
+   * statement covers every combination, and `complete` is false.
+   */
+  function combinationEnvelope(model, runs) {
+    const solved = runs.filter((x) => x.result && x.result.ok);
+    const members = model.members.map((e, k) => {
+      let minSF = null, maxTension = null, maxCompression = null;
+      for (const { combination, result } of solved) {
+        const m = result.members[k];
+        if (!minSF || m.sf < minSF.value) minSF = { value: m.sf, governs: m.governs, combination };
+        if (m.force > 0 && (!maxTension || m.force > maxTension.value)) maxTension = { value: m.force, combination };
+        if (m.force < 0 && (!maxCompression || m.force < maxCompression.value)) maxCompression = { value: m.force, combination };
+      }
+      return { minSF, maxTension, maxCompression };
+    });
+    let governing = null;
+    members.forEach((x, k) => {
+      if (x.minSF && (!governing || x.minSF.value < governing.value)) governing = { value: x.minSF.value, member: k, governs: x.minSF.governs, combination: x.minSF.combination };
+    });
+    const unsolved = runs.filter((x) => !(x.result && x.result.ok)).map((x) => x.combination);
+    return { members, governing, solved: solved.map((x) => x.combination), unsolved, complete: solved.length > 0 && unsolved.length === 0 };
   }
 
   /* =====================================================================
@@ -879,6 +1076,9 @@
     // self-weight: material density and the generated dead-load case
     GRAVITY, SELF_WEIGHT, validDensity, isGeneratedCase, memberSelfWeight, selfWeightLoads, selfWeightCase, addSelfWeightCase,
     selfWeightSummary,
+    // load combinations (milestone 5): F = Σ γᵢ·Fᵢ, u_s = Σ γᵢ·u_s,ᵢ, each combination solved directly
+    isCombination, makeCombination, addCombination, removeCombination, setActiveCombination, combinationFactor, setCombinationFactor,
+    combinationLoads, combinationSettlements, caseSettlements, activeTarget, analyzeCombination, analyzeCombinations, combinationEnvelope,
     // file format version 2 (reads version 1 too) and model checks
     FORMAT_VERSION, serialize, readModel, deserialize, validateModel,
     // example structures

@@ -29,14 +29,14 @@ Keep `fea-core.js` one self-contained file. Change its mathematical formulation 
 
 - The existing horizontal-extent / maximum-total-displacement ratio is not approved as a general structural design acceptance criterion. Do not implement the design deflection check until a physically appropriate measure has been agreed upon and documented.
 - Never add safety factors, utilisations or member classifications across load cases or combinations. Solve each combination directly and take the worst governing value.
-- Since milestone 3, λ scales every action of the active load case: nodal loads and prescribed settlements alike. λ = 0 gives zero results only for a stable model; a mechanism stays unstable at any λ.
+- Since milestone 3, λ scales every action of the active load case: nodal loads and prescribed settlements alike. Since milestone 5 it multiplies a combination once, after its factors: λ·Σγᵢ·Fᵢ. λ = 0 gives zero results only for a stable model; a mechanism stays unstable at any λ.
 
 ## Current code
 
 | Global | Defined in | Notes |
 |---|---|---|
 | `FEA` | `fea-core.js` | Numerical engine; also `module.exports` under Node |
-| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects and load cases, material densities and the generated self-weight case (`memberSelfWeight`, `selfWeightLoads`, `caseLoads`, `selfWeightSummary`), file format version 2 (`readModel` also reads version 1 files, reports and sessions), `validateModel`, examples, `toAnalysisInput`, saved-session storage with injected `Storage` (`loadStoredSession`, `saveStoredSession`); also `module.exports` under Node |
+| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects and load cases, material densities and the generated self-weight case (`memberSelfWeight`, `selfWeightLoads`, `caseLoads`, `selfWeightSummary`), load combinations (`combinationLoads`, `analyzeCombination`, `analyzeCombinations`, `combinationEnvelope`), file format version 2 (`readModel` also reads version 1 files, reports and sessions), `validateModel`, examples, `toAnalysisInput`, saved-session storage with injected `Storage` (`loadStoredSession`, `saveStoredSession`); also `module.exports` under Node |
 | `TrussLab` | `script.js` (end) | Older test hook that exposes live internal state. Keep it unchanged for compatibility; new code and tests must not depend on it |
 | `TrussLabTest` | `script.js` section 17 | Testing adapter, version 2, installed only in smoke mode (`?smoke`) |
 
@@ -46,7 +46,7 @@ Saved sessions live in `localStorage` under `trusslab.session.v2`; `trusslab.ses
 
 ## Tests
 
-- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (563 checks, including the nine examples at λ = 1 against the regression baseline in `test/fixtures/examples-baseline.js`).
+- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (707 checks, including the nine examples at λ = 1 against the regression baseline in `test/fixtures/examples-baseline.js`).
 - Browser smoke test (`test/browser-smoke.js`), in two modes:
   - `index.html?smoke` runs every scenario against the real page and must end with PASS.
   - `index.html?smoke=selftest` adds one deliberately failing scenario. It ends with PASS only if exactly that scenario fails and every clean-up check still passes, which shows that a failing test cannot damage the user's work.
@@ -62,10 +62,11 @@ Done:
 - `4712cba` Rev 4, milestone 2: DOM-free model layer. `model.js` (global `TrussModel`) with `toAnalysisInput`, `test/model.test.js` (206 checks) and the example baseline `test/fixtures/examples-baseline.js`. No behaviour change; file format version 1 unchanged.
 - `dac8c99` Rev 5, milestone 3: load cases. Loads and settlements belong to load cases; supports keep only their restraint (type, angle, fixed axes). λ scales loads and settlements. File format version 2, reading version 1 model files, report files and autosaved sessions (with migration tests for each); verified session migration, backups of unreadable sessions, no writes after a failed read, import notes kept with the session, "Changes not saved — browser storage unavailable" status notes; model warnings (`validateModel`); `TrussLabTest` version 2.
 - `1e4820c` Rev 6, milestone 4: material density and the generated self-weight load case. Materials carry a density ρ in kg/m³ (presets: steel 7850, aluminium 2700, Douglas fir 540; none for a custom material or for materials read from older files). **+ Self-weight case** adds one generated dead-load case: W = ρ·A·L·g (g = 9.80665 m/s²) per member, W/2 downward at each end node, computed from the current model whenever it is read, never stored, so it cannot go stale or accumulate; manual loads and settlements are refused in it. Saved as additive optional fields of file format version 2 (`density`, `"generated": "self-weight"`). Warnings for materials without density.
-- Milestone 4 decisions (maintainer, final): file format stays version 2 with optional fields, no new session key, and the downgrade limitation for a milestone 3 build is documented (README, `model-format.md` §8). Missing densities are never filled in from a preset, even when E and σy match it, and a self-weight case with a member lacking density is marked incomplete wherever it is shown (`selfWeightSummary`: health report, node Inspector, canvas HUD, report exports). Douglas fir 540 kg/m³ is labelled an approximate representative value at 12 % moisture content (USDA FPL *Wood Handbook* 2021, Table 5–3b: specific gravity 0.48; 1000 × 0.48 × 1.12 = 537.6, rounded).
+- `16d3fc9` Rev 7, milestone 4 decisions (maintainer, final): file format stays version 2 with optional fields, no new session key, and the downgrade limitation for a milestone 3 build is documented (README, `model-format.md` §8). Missing densities are never filled in from a preset, even when E and σy match it, and a self-weight case with a member lacking density is marked incomplete wherever it is shown (`selfWeightSummary`: health report, node Inspector, canvas HUD, report exports). Douglas fir 540 kg/m³ is labelled an approximate representative value at 12 % moisture content (USDA FPL *Wood Handbook* 2021, Table 5–3b: specific gravity 0.48; 1000 × 0.48 × 1.12 = 537.6, rounded).
+
+- Milestone 5: load combinations. A combination holds factors γ on load cases (the self-weight case included; negative and 0 allowed); its actions F = Σγᵢ·Fᵢ and u_s = Σγᵢ·u_s,ᵢ are built first and solved directly with `FEA.analyze`, then λ multiplies the whole once. Any combination can be solved, active or not (`analyzeCombination`, `analyzeCombinations`), each with its own complete result; `combinationEnvelope` gives the worst governing value, the lowest SF among the combinations' own results, never a sum of safety factors or utilisations. Shown through the load-case list ("Combinations"), with a factor field per load case, read-only combined actions in the Inspector, the HUD, a health-report overview of every combination, and `combinationResults` in reports. Saved as optional fields of file format version 2 (`combinations`, `activeCombination`), with the downgrade limitation documented.
 
 Next, strictly one at a time, each approved before the next begins:
-5. Load combinations solved directly, with worst-case results.
 6. UI/UX redesign, before any educational interface (follow `trusslab-ui-design`):
    - audit the complete existing UI and identify the sources of unnecessary complexity;
    - propose three distinct design directions, with wireframes and a design-token system;

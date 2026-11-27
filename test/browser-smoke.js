@@ -657,6 +657,73 @@
     check('deleting it leaves "Load case 1", and the button is enabled again', cases().length === 1 && active() === 1 && !el('#btnAddSelfWeight').disabled);
   });
 
+  scenario('Load combinations: factored load cases solved directly as one action state, with the worst case over combinations', async () => {
+    await loadExample('aframe'); // two 5 m bars from pins at (0, 0) and (6, 0) to the apex (3, 4); Load case 1: 100 kN down at the apex
+    // apex equilibrium with H to the right and P down: N_left = (−P/0.8 + H/0.6)/2, N_right = (−P/0.8 − H/0.6)/2
+    const nLeft = (Hh, Pp) => (-Pp / 0.8 + Hh / 0.6) / 2, nRight = (Hh, Pp) => (-Pp / 0.8 - Hh / 0.6) / 2;
+    const sum = (r, k) => r.nodes.reduce((t, n) => t + n[k], 0), combos = () => model().combinations, cf = (i) => `#comboEditor [data-cf="${i}"]`;
+    must('one load case, no combination, and the factor editor hidden', model().loadCases.length === 1 && combos().length === 0 && model().activeCombination === null && el('#comboEditor').hidden);
+    press('#btnAddCase'); await settle();
+    key('l'); setValue('#toFx', '10'); setValue('#toFy', '0'); setValue('#toLoadMode', 'set');
+    await click(3, 4); // Load case 2: 10 kN to the right at the apex
+    must('Load case 2 holds 10 kN to the right at the apex', model().loadCases[1].loads.length === 1 && model().loadCases[1].loads[0].fx === 10e3);
+    key('v');
+    press('#btnAddCombination'); await settle();
+    check('"+ Combination" adds "Combination 1" = 1 × the active load case, shows it, and opens its factors',
+      combos().length === 1 && combos()[0].name === 'Combination 1' && JSON.stringify(combos()[0].terms) === JSON.stringify([{ loadCase: 2, factor: 1 }]) && model().activeCombination === 1 && !el('#comboEditor').hidden);
+    check('the list shows it under "Combinations", marked as a combination', /<optgroup label="Combinations">/.test(el('#selLoadCase').innerHTML) && /Combination 1 \(combination\)/.test(el('#selLoadCase').innerHTML));
+    near('1 × Load case 2 alone: ΣR_x = −10 kN', sum(T.results(), 'rx'), -10e3, 1e-12);
+    setValue(cf(0), '1.5'); await settle();
+    check('a factor of 1.5 on Load case 1 is stored, in load-case order', JSON.stringify(combos()[0].terms) === JSON.stringify([{ loadCase: 1, factor: 1.5 }, { loadCase: 2, factor: 1 }]));
+    const r = T.results();
+    near('1.5 × Load case 1 + 1 × Load case 2 solved directly: the left bar carries (−150/0.8 + 10/0.6)/2 kN (closed form)', r.members[0].force, nLeft(10e3, 150e3), 1e-12);
+    near('... and the right bar (−150/0.8 − 10/0.6)/2 kN', r.members[1].force, nRight(10e3, 150e3), 1e-12);
+    near('... and the reactions carry ΣR_y = 150 kN', sum(r, 'ry'), 150e3, 1e-12);
+    check('the canvas names the combination and its factors', /Combination: Combination 1 = 1\.5 × Load case 1 \+ 1 × Load case 2/.test(text('#hud')), text('#hud'));
+    check('the health report says it is solved directly as one action state, and lists every combination on its own',
+      /Combination “Combination 1”/.test(text('#health')) && /solved directly as one action state/.test(text('#health')) && /All combinations, each solved on its own/.test(text('#health')) && /Governing: SF/.test(text('#health')));
+    const stored = JSON.stringify(model().loadCases);
+    key('l'); await click(3, 4);
+    check('the Load tool enters nothing while a combination is shown, and says why', JSON.stringify(model().loadCases) === stored && /is a combination: its actions are the factored sum of its load cases/.test(text('#toast')), text('#toast'));
+    key('v'); await click(3, 4);
+    check('the Inspector shows the apex\'s combined actions read-only, with no load or settlement fields',
+      /Combined actions in “Combination 1”/.test(text('#inspector')) && /F = Σ γᵢ·Fᵢ from/.test(text('#inspector')) && !/data-f="(fx|fy|fmag|fang|sdx|sdy)"/.test(el('#inspector').innerHTML));
+    setValue('#txtCaseName', 'ULS 1'); await settle();
+    check('the name field renames the combination on screen', combos()[0].name === 'ULS 1' && model().loadCases.every((c) => c.name !== 'ULS 1') && /ULS 1 \(combination\)/.test(el('#selLoadCase').innerHTML));
+    setValue(cf(1), '-1'); await settle();
+    near('a negative factor reverses Load case 2: ΣR_x = +10 kN', sum(T.results(), 'rx'), 10e3, 1e-12);
+    setValue(cf(1), '0'); await settle();
+    check('a zero factor keeps the case listed and adds nothing: ΣR_x = 0', combos()[0].terms.length === 2 && combos()[0].terms[1].factor === 0 && Math.abs(sum(T.results(), 'rx')) < 1e-9);
+    setValue(cf(1), 'abc'); await settle();
+    check('an invalid factor is refused and changes nothing', combos()[0].terms[1].factor === 0);
+    setValue(cf(1), ''); await settle();
+    check('an empty factor leaves the case out of the combination', JSON.stringify(combos()[0].terms) === JSON.stringify([{ loadCase: 1, factor: 1.5 }]));
+    ctrl('z'); await settle();
+    check('Ctrl+Z brings the factor back, and the combination stays on screen', combos()[0].terms.length === 2 && combos()[0].terms[1].factor === 0 && model().activeCombination === 1);
+    setValue(cf(1), '1'); await settle();
+    setValue('#numLoadFactor', '2'); await settle();
+    near('λ = 2 multiplies the whole combination once: ΣR_y = 2 × 150 kN', sum(T.results(), 'ry'), 300e3, 1e-12);
+    setValue('#numLoadFactor', '1'); await settle();
+    press('#btnAddCombination'); await settle(); // "Combination 2" = 1 × Load case 2 (the active load case)
+    setValue(cf(0), '3'); await settle(); // 3 × Load case 1 + 1 × Load case 2: the heavier one
+    check('a second combination is listed, and both appear in the health report, each with its own result',
+      combos().length === 2 && model().activeCombination === 2 && /ULS 1/.test(text('#health')) && /Combination 2 \(shown\)/.test(text('#health')));
+    check('the governing value names the combination that produces it', /Governing: SF [^ ]+ at M\d \(\w+\) in “Combination 2”/.test(text('#health')), text('#health').slice(0, 400));
+    setValue('#selLoadCase', '0'); await settle();
+    check('choosing Load case 1 shows the case again, with its own 100 kN results', model().activeCombination === null && model().activeLoadCase === 1 && Math.abs(T.results().members[0].force / -62500 - 1) < 1e-12 && el('#comboEditor').hidden);
+    setValue('#selLoadCase', 'c0'); await settle();
+    T.saveNow();
+    const rr = T.reloadStoredSession(); await settle();
+    check('after saving and reloading the session, both combinations and the one on screen are restored',
+      rr.restored && combos().length === 2 && combos()[0].name === 'ULS 1' && JSON.stringify(combos()[0].terms) === JSON.stringify([{ loadCase: 1, factor: 1.5 }, { loadCase: 2, factor: 1 }]) && model().activeCombination === 1);
+    near('... with the same results', T.results().members[0].force, nLeft(10e3, 150e3), 1e-12);
+    press('#btnDeleteCase'); await settle();
+    check('Delete removes the combination on screen and shows the active load case', combos().length === 1 && combos()[0].name === 'Combination 2' && model().activeCombination === null);
+    setValue('#selLoadCase', '1'); await settle();
+    press('#btnDeleteCase'); await settle();
+    check('deleting Load case 2 also removes its factor from the combination', model().loadCases.length === 1 && JSON.stringify(combos()[0].terms) === JSON.stringify([{ loadCase: 1, factor: 3 }]));
+  });
+
   scenario('Opening version 1 files: the λ notice appears only with a settlement, and stays dismissed', async () => {
     if (typeof DataTransfer !== 'function') { skip('opening files', 'this browser cannot build a file list (no DataTransfer)'); return; }
     must('the notice is hidden to start with', el('#updateNotice').hidden);

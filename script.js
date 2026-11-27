@@ -36,6 +36,7 @@
     EXAMPLES, buildExample, toAnalysisInput,
     addLoadCase, removeLoadCase, setActiveLoadCase, removeNodeActions, nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement,
     GRAVITY, validDensity, isGeneratedCase, memberSelfWeight, selfWeightCase, addSelfWeightCase, selfWeightSummary,
+    addCombination, removeCombination, setActiveCombination, combinationFactor, setCombinationFactor, analyzeCombination, combinationEnvelope,
     SESSION_KEYS, SMOKE_SESSION_KEYS, loadStoredSession, saveStoredSession,
   } = TrussModel;
 
@@ -137,9 +138,10 @@
 
   const history = { undo: [], redo: [], max: 200 };
   // An undo snapshot is the model in file format version 2, the session ids of its load cases, and its import notes.
-  // The ids let undo and redo keep the load case you are looking at: switching cases is not an edit and is never
-  // undone. The notes describe the file the model came from, so undoing an Open… brings back the earlier model's notes.
-  const snapshot = () => JSON.stringify({ model: serialize(state.model), caseUids: state.model.loadCases.map((c) => c.uid), importNotes: state.importNotes });
+  // The ids let undo and redo keep the load case or combination you are looking at: switching is not an edit and is
+  // never undone. The notes describe the file the model came from, so undoing an Open… brings back the earlier model's notes.
+  const snapshot = () => JSON.stringify({ model: serialize(state.model), caseUids: state.model.loadCases.map((c) => c.uid),
+    comboUids: state.model.combinations.map((c) => c.uid), importNotes: state.importNotes });
   function pushUndo(snap) {
     history.undo.push(snap || snapshot());
     if (history.undo.length > history.max) history.undo.shift();
@@ -149,13 +151,16 @@
   function restoreSnapshot(str) {
     const gi = state.model.groups.indexOf(state.activeGroup);
     const ei = state.model.groups.indexOf(state.editGroup);
-    const activeUid = state.model.activeCase.uid;
+    const activeUid = state.model.activeCase.uid, comboUid = state.model.activeCombination ? state.model.activeCombination.uid : null;
     const obj = JSON.parse(str);
     const model = readModel(obj).model;
     if (Array.isArray(obj.caseUids) && obj.caseUids.length === model.loadCases.length) model.loadCases.forEach((c, i) => { c.uid = obj.caseUids[i]; });
+    if (Array.isArray(obj.comboUids) && obj.comboUids.length === model.combinations.length) model.combinations.forEach((c, i) => { c.uid = obj.comboUids[i]; });
     // keep the active case if it still exists; otherwise the snapshot's active case, which always does
     const keep = model.loadCases.find((c) => c.uid === activeUid);
     if (keep) model.activeCase = keep;
+    // keep the combination on screen if it still exists; with a load case on screen, stay on the load case
+    model.activeCombination = comboUid === null ? null : model.combinations.find((c) => c.uid === comboUid) || null;
     state.model = model;
     state.importNotes = Array.isArray(obj.importNotes) ? obj.importNotes : [];
     state.activeGroup = state.model.groups[gi] || state.model.groups[0];
@@ -298,6 +303,7 @@
     r.memberIndex = new Map(r.memberObjs.map((e, i) => [e, i]));
     r.loadFactor = state.s.loadFactor;
     state.res = r;
+    state.comboRuns = combinationRuns(r);
     state.stale = false;
     if (r.ok && state.s.autoScale) autoScale();
     if (r.mechanism) { state.mechMode = clamp(state.mechMode, 0, r.mechanism.modes.length - 1); if (!state.mechT0) state.mechT0 = performance.now(); }
@@ -305,6 +311,32 @@
     if (animate && r.ok && state.s.animate) { state.anim.start = performance.now(); state.anim.p = 0; }
     refreshResults();
     requestRender();
+  }
+  /**
+   * With a combination on screen: every combination of the model, each solved directly on its own complete action
+   * state (the one on screen reuses its result), for the worst case over combinations. Otherwise null.
+   */
+  function combinationRuns(r) {
+    const M = state.model, ac = M.activeCombination;
+    if (!ac) return null;
+    const opts = { loadFactor: state.s.loadFactor, targetSF: state.s.targetSF };
+    return M.combinations.map((c) => {
+      if (c === ac) return { combination: c, result: r };
+      try { return { combination: c, result: analyzeCombination(M, c, opts) }; }
+      catch (err) { return { combination: c, result: { ok: false, errors: [{ msg: 'Internal solver error: ' + err.message }], warnings: [], members: [], nodes: [] } }; }
+    });
+  }
+  /** "1.35 × Self-weight + 1.5 × Load case 1": a combination's factors, as text (a negative factor is subtracted). */
+  function combinationText(c) {
+    if (!c.terms.length) return 'no load cases';
+    return c.terms.map((t, i) => `${i ? (t.factor < 0 ? ' \u2212 ' : ' + ') : t.factor < 0 ? MINUS : ''}${inVal(Math.abs(t.factor))} × ${t.loadCase.name}`).join('');
+  }
+  /** A factor γ as entered (1.5, not 1.50000), with a true minus sign. */
+  const fmtFactor = (f) => (f < 0 ? MINUS : '') + inVal(Math.abs(f));
+  /** The generated self-weight case is part of what is analysed: it is the active case, or has a non-zero factor in the combination. */
+  function selfWeightAnalysed() {
+    const M = state.model, c = M.activeCombination;
+    return c ? c.terms.some((t) => isGeneratedCase(t.loadCase) && t.factor !== 0) : isGeneratedCase(M.activeCase);
   }
   /** Results that belong to the current model (or are being refreshed live). */
   function R() {
@@ -826,8 +858,10 @@
     const r = info.r;
     const lines = [];
     if (info.mode === 'deformed') lines.push(`<b>Deflection ×${fmt(state.s.scale, 4)}</b> · dashed = undeformed`);
-    if (state.model.loadCases.length > 1) lines.push(`Load case: <b>${esc(state.model.activeCase.name)}</b>${isGeneratedCase(state.model.activeCase) ? ' (generated)' : ''}`);
-    if (isGeneratedCase(state.model.activeCase)) {
+    const ac = state.model.activeCombination;
+    if (ac) lines.push(`Combination: <b>${esc(ac.name)}</b> = ${esc(combinationText(ac))}`);
+    else if (state.model.loadCases.length > 1) lines.push(`Load case: <b>${esc(state.model.activeCase.name)}</b>${isGeneratedCase(state.model.activeCase) ? ' (generated)' : ''}`);
+    if (selfWeightAnalysed()) {
       const sw = selfWeightSummary(state.model);
       if (!sw.complete) lines.push(`<b>Self-weight incomplete:</b> ${plural(sw.missing.length, 'member')} without density`);
     }
@@ -1025,8 +1059,16 @@
     selectOnly('node', n);
     modelChanged();
   }
-  /** True, after a message, when the active case is the generated self-weight case: no loads or settlements go into it. */
-  function refuseGenerated() {
+  /**
+   * True, after a message, when loads and settlements cannot be entered in what is on screen: a combination (its
+   * actions are the factored sum of its load cases) or the generated self-weight case.
+   */
+  function refuseEntry() {
+    const c = state.model.activeCombination;
+    if (c) {
+      toast(`“${c.name}” is a combination: its actions are the factored sum of its load cases. Choose a load case to enter loads or settlements`, 'warn');
+      return true;
+    }
     const lc = state.model.activeCase;
     if (!isGeneratedCase(lc)) return false;
     toast(`“${lc.name}” is generated from the members’ weight, so loads and settlements cannot be entered in it. Choose another load case`, 'warn');
@@ -1034,7 +1076,7 @@
   }
   function downLoad(sx, sy) {
     const n = pickNode(sx, sy, 10);
-    if (!n || refuseGenerated()) return;
+    if (!n || refuseEntry()) return;
     pushUndo();
     const t = state.loadTool, cur = nodeLoad(state.model, n); // the active load case
     if (t.mode === 'clear') setNodeLoad(state.model, n, 0, 0);
@@ -1309,23 +1351,72 @@
    * ===================================================================== */
   function renderLeftLists() { renderMaterials(); renderGroups(); renderGroupEditor(); renderLoadCases(); if (state.tool === 'member') renderToolOptions(); }
 
-  /** Load-case controls (Analysis section): the active case, its name, and adding or deleting cases. */
+  /**
+   * Load-case controls (Analysis section): what is on screen (a load case, or a combination listed under
+   * "Combinations"), its name, adding or deleting cases and combinations, and a combination's factors.
+   */
   function renderLoadCases() {
-    const m = state.model, sel = $('#selLoadCase'), name = $('#txtCaseName');
-    sel.innerHTML = m.loadCases.map((c, i) => `<option value="${i}">${esc(c.name)}${isGeneratedCase(c) ? ' (generated)' : ''}</option>`).join('');
-    sel.value = String(m.loadCases.indexOf(m.activeCase));
-    if (document.activeElement !== name) name.value = m.activeCase.name;
-    $('#btnDeleteCase').disabled = m.loadCases.length <= 1;
+    const m = state.model, sel = $('#selLoadCase'), name = $('#txtCaseName'), ac = m.activeCombination;
+    sel.innerHTML = m.loadCases.map((c, i) => `<option value="${i}">${esc(c.name)}${isGeneratedCase(c) ? ' (generated)' : ''}</option>`).join('') +
+      (m.combinations.length ? `<optgroup label="Combinations">${m.combinations.map((c, i) => `<option value="c${i}">${esc(c.name)} (combination)</option>`).join('')}</optgroup>` : '');
+    sel.value = ac ? `c${m.combinations.indexOf(ac)}` : String(m.loadCases.indexOf(m.activeCase));
+    if (document.activeElement !== name) name.value = (ac || m.activeCase).name;
+    const del = $('#btnDeleteCase');
+    del.disabled = !ac && m.loadCases.length <= 1;
+    del.title = ac ? 'Delete this combination (Ctrl+Z undoes it)' : 'Delete the active load case (Ctrl+Z undoes it)';
     const sw = $('#btnAddSelfWeight'), has = !!selfWeightCase(m);
     sw.disabled = has;
     sw.title = has ? 'This model already has its self-weight case' : 'Add the generated self-weight case: each member’s weight W = ρ·A·L·g, half at each end node';
-    $('#selfWeightNote').hidden = !isGeneratedCase(m.activeCase);
+    $('#selfWeightNote').hidden = !!ac || !isGeneratedCase(m.activeCase);
+    renderCombinationEditor();
+  }
+  /** The factors γ of the combination on screen: one field per load case, empty when the case is not in it. */
+  function renderCombinationEditor() {
+    const box = $('#comboEditor'), c = state.model.activeCombination;
+    box.hidden = !c;
+    if (!c) { box.innerHTML = ''; return; }
+    if (box.contains(document.activeElement)) return; // do not rebuild a field while it is being typed in
+    box.innerHTML = `<p class="note">Factors γ of “${esc(c.name)}”. Its actions F = Σ γᵢ·Fᵢ and u<sub>s</sub> = Σ γᵢ·u<sub>s,i</sub> are built first and analysed as one complete state, solved directly, then multiplied by λ. Leave a factor empty to leave the case out; 0 and negative factors are allowed.</p>
+      <div class="form-grid">${state.model.loadCases.map((lc, i) => {
+        const f = combinationFactor(c, lc);
+        return `<label for="cf${i}">${esc(lc.name)}${isGeneratedCase(lc) ? ' (generated)' : ''}</label><div class="inline"><input class="num" id="cf${i}" data-cf="${i}" value="${f === null ? '' : inVal(f)}" placeholder="not included" title="Factor γ on “${esc(lc.name)}”; empty leaves it out"><span class="u">γ</span></div>`;
+      }).join('')}</div>`;
   }
   function bindLoadCases() {
     $('#selLoadCase').addEventListener('change', (e) => {
-      const lc = state.model.loadCases[+e.target.value];
-      if (!lc || lc === state.model.activeCase) return;
-      setActiveLoadCase(state.model, lc); // choosing what to look at is not an edit: no undo step
+      const v = e.target.value, M = state.model;
+      // choosing what to look at is not an edit: no undo step
+      if (v[0] === 'c') {
+        const c = M.combinations[+v.slice(1)];
+        if (!c || c === M.activeCombination) return;
+        setActiveCombination(M, c);
+      } else {
+        const lc = M.loadCases[+v];
+        if (!lc || (lc === M.activeCase && !M.activeCombination)) return;
+        setActiveLoadCase(M, lc);
+      }
+      renderLoadCases();
+      modelChanged();
+    });
+    $('#btnAddCombination').addEventListener('click', () => {
+      pushUndo();
+      const M = state.model, c = addCombination(M);
+      setCombinationFactor(M, c, M.activeCase, 1);
+      setActiveCombination(M, c);
+      renderLoadCases();
+      modelChanged();
+      toast(`Added “${c.name}” = 1 × ${M.activeCase.name}. Set a factor for each load case; the combination is solved as one complete state`, 'ok');
+    });
+    $('#comboEditor').addEventListener('change', (e) => {
+      const i = e.target.dataset.cf, M = state.model, c = M.activeCombination;
+      if (i === undefined || !c) return;
+      const lc = M.loadCases[+i], raw = e.target.value.trim();
+      const v = raw === '' ? null : evalNum(raw);
+      e.target.blur();
+      if (v !== null && !Number.isFinite(v)) { toast('A factor must be a number (0 and negative factors are allowed), or empty to leave the case out', 'warn'); renderCombinationEditor(); return; }
+      if (v === combinationFactor(c, lc)) { renderCombinationEditor(); return; }
+      pushUndo();
+      setCombinationFactor(M, c, lc, v);
       renderLoadCases();
       modelChanged();
     });
@@ -1346,22 +1437,32 @@
     });
     const name = $('#txtCaseName');
     name.addEventListener('change', () => {
+      const target = state.model.activeCombination || state.model.activeCase; // renames what is on screen
       const v = name.value.trim().slice(0, 80);
-      if (!v || v === state.model.activeCase.name) { name.value = state.model.activeCase.name; return; }
+      if (!v || v === target.name) { name.value = target.name; return; }
       pushUndo();
-      state.model.activeCase.name = v;
+      target.name = v;
       renderLoadCases();
       modelChanged();
     });
     name.addEventListener('keydown', (e) => { if (e.key === 'Enter') name.blur(); });
     $('#btnDeleteCase').addEventListener('click', () => {
-      if (state.model.loadCases.length <= 1) return;
+      const M = state.model, c = M.activeCombination;
+      if (c) {
+        pushUndo();
+        removeCombination(M, c);
+        renderLoadCases();
+        modelChanged();
+        toast(`Deleted “${c.name}” (Ctrl+Z undoes it)`);
+        return;
+      }
+      if (M.loadCases.length <= 1) return;
       pushUndo();
-      const gone = state.model.activeCase.name;
-      removeLoadCase(state.model, state.model.activeCase);
+      const gone = M.activeCase.name, used = M.combinations.filter((x) => combinationFactor(x, M.activeCase) !== null).map((x) => `“${x.name}”`);
+      removeLoadCase(M, M.activeCase);
       renderLoadCases();
       modelChanged();
-      toast(`Deleted “${gone}” (Ctrl+Z undoes it)`);
+      toast(`Deleted “${gone}”${used.length ? `, and its factor in ${used.join(', ')}` : ''} (Ctrl+Z undoes it)`);
     });
   }
 
@@ -1626,7 +1727,8 @@
   }
   function nodeForm(n) {
     const s = n.support, fu = state.s.forceUnit, du = state.s.dispUnit;
-    const L = nodeLoad(state.model, n), st = nodeSettlement(state.model, n), caseName = esc(state.model.activeCase.name);
+    const ac = state.model.activeCombination; // with a combination on screen, nodeLoad and nodeSettlement give its combined actions
+    const L = nodeLoad(state.model, n), st = nodeSettlement(state.model, n), caseName = esc((ac || state.model.activeCase).name);
     const F = Math.hypot(L.fx, L.fy), ang = F > 0 ? Math.atan2(L.fy, L.fx) / D2R : 0;
     let sup = `<label>Type</label><select class="select" data-f="stype">${SUPPORT_TYPES.map(([k, l]) => `<option value="${k}" ${k === s.type ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
     if (s.type === 'inclined') sup += `<label>Surface α</label><div class="inline">${numIn('sangle', s.angle, 'title="Angle of the rolling surface from +x, degrees CCW"')}<span class="u">°</span></div>`;
@@ -1641,8 +1743,8 @@
     const settle = axes.length ? `<div class="sub-h">Settlement in “${caseName}” (before λ)</div><div class="form-grid">${axes.map(([f, ax, fixed, v]) =>
       `<label>δ along ${ax}</label><div class="inline">${numIn(f, v / dU(), fixed ? 'title="Prescribed displacement along this support axis"' : 'title="This axis is not fixed, so this settlement has no effect"')}<span class="u">${du}</span></div>`).join('')}</div>` : '';
     const warn = nodeWarnings(n).map((w) => `<p class="note warn-note">${esc(w.msg)}</p>`).join('');
-    const gen = isGeneratedCase(state.model.activeCase);
-    const loadPart = gen ? selfWeightNodeText(n, L, caseName) : `
+    const gen = !ac && isGeneratedCase(state.model.activeCase);
+    const loadPart = ac ? combinationNodeText(n, L, st, ac) : gen ? selfWeightNodeText(n, L, caseName) : `
       <div class="sub-h">Nodal load in “${caseName}” (before λ)</div>
       <div class="form-grid">
         <label>F<sub>x</sub></label><div class="inline">${numIn('fx', L.fx / fU())}<span class="u">${fu}</span></div>
@@ -1658,7 +1760,7 @@
         <label>Y</label><div class="inline">${numIn('y', n.y, 'title="Expressions allowed, e.g. 2.5*sqrt(3)"')}<span class="u">m</span></div>
       </div>
       <div class="sub-h">Support / boundary condition</div>
-      <div class="form-grid">${sup}</div>${warn}${gen ? '' : settle}${loadPart}
+      <div class="form-grid">${sup}</div>${warn}${gen || ac ? '' : settle}${loadPart}
       <div class="sub-h">Results</div><div id="insResults"></div>`;
   }
   /** The node's load in the generated self-weight case, read-only, with where it comes from. */
@@ -1671,6 +1773,20 @@
       <div class="form-grid"><label>F<sub>y</sub></label><div class="inline"><span>${fF(L.fy)}</span><span class="u">${fu}</span></div></div>
       ${without.length ? `<p class="note warn-note">Incomplete: ${without.join(', ')} ${without.length > 1 ? 'have' : 'has'} no density, so ${without.length > 1 ? 'their' : 'its'} weight is not included in this load. Enter the density ρ under Materials.</p>` : ''}
       <p class="note">${parts.length ? `Half the weight of each member at this node, acting downward: ${parts.join(', ')} ${fu}.` : 'No member is connected to this node, so it carries no self-weight.'} Recalculated whenever the geometry, a section or a material changes. Loads cannot be entered in this case.</p>`;
+  }
+  /** The node's combined actions in a combination, read-only, with the factored load of each case. */
+  function combinationNodeText(n, L, st, c) {
+    const fu = state.s.forceUnit, du = state.s.dispUnit;
+    const parts = c.terms.map((t) => {
+      const v = nodeLoad(state.model, n, t.loadCase);
+      return v.fx || v.fy ? `${fmtFactor(t.factor)} × ${esc(t.loadCase.name)} (${fF(v.fx)}, ${fF(v.fy)})` : null;
+    }).filter(Boolean);
+    const settled = st.dx !== 0 || st.dy !== 0;
+    return `<div class="sub-h">Combined actions in “${esc(c.name)}” (before λ)</div>
+      <div class="form-grid"><label>F<sub>x</sub></label><div class="inline"><span>${fF(L.fx)}</span><span class="u">${fu}</span></div>
+        <label>F<sub>y</sub></label><div class="inline"><span>${fF(L.fy)}</span><span class="u">${fu}</span></div>
+        ${settled ? `<label>δ along x′</label><div class="inline"><span>${fD(st.dx)}</span><span class="u">${du}</span></div><label>δ along y′</label><div class="inline"><span>${fD(st.dy)}</span><span class="u">${du}</span></div>` : ''}</div>
+      <p class="note">${parts.length ? `F = Σ γᵢ·Fᵢ from ${parts.join(', ')} ${fu}.` : 'No load case in this combination loads this node.'}${settled ? ' The settlement is Σ γᵢ·δᵢ along the support axes.' : ''} Loads and settlements are entered in the load cases, not in a combination.</p>`;
   }
   function memberForm(e) {
     return `
@@ -1699,8 +1815,8 @@
         <div class="form-grid">
           <label>Support</label><div class="inline"><select class="select" data-m="stype">${SUPPORT_TYPES.filter(([k]) => k !== 'custom').map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
           <label>Angle α</label><div class="inline"><input class="num" data-m="sangle" value="30"><span class="u">°</span><button class="btn sm" data-act="mm-support">Apply</button></div>
-          <label>Load case</label><div class="inline"><span class="dim">${esc(state.model.activeCase.name)}${isGeneratedCase(state.model.activeCase) ? ' (generated: no loads can be entered)' : ''}</span></div>
-          ${isGeneratedCase(state.model.activeCase) ? '' : `<label>F<sub>x</sub></label><div class="inline"><input class="num" data-m="fx" value="0"><span class="u">${fu}</span></div>
+          <label>${state.model.activeCombination ? 'Combination' : 'Load case'}</label><div class="inline"><span class="dim">${state.model.activeCombination ? `${esc(state.model.activeCombination.name)} (no loads can be entered)` : `${esc(state.model.activeCase.name)}${isGeneratedCase(state.model.activeCase) ? ' (generated: no loads can be entered)' : ''}`}</span></div>
+          ${state.model.activeCombination || isGeneratedCase(state.model.activeCase) ? '' : `<label>F<sub>x</sub></label><div class="inline"><input class="num" data-m="fx" value="0"><span class="u">${fu}</span></div>
           <label>F<sub>y</sub></label><div class="inline"><input class="num" data-m="fy" value="${inVal(-10e3 / fU())}"><span class="u">${fu}</span><button class="btn sm" data-act="mm-load">Apply</button></div>`}
         </div>`;
     }
@@ -1727,7 +1843,8 @@
         <dt>Global DOFs</dt><dd>${2 * M.nodes.length}</dd>
         <dt>Supported nodes</dt><dd>${nSup}</dd>
         <dt>Load cases</dt><dd>${M.loadCases.length}, active: ${esc(M.activeCase.name)}</dd>
-        <dt>Loaded nodes</dt><dd>${nLoad} <small>in the active case</small></dd>
+        ${M.combinations.length ? `<dt>Combinations</dt><dd>${M.combinations.length}${M.activeCombination ? `, analysed: ${esc(M.activeCombination.name)}` : ''}</dd>` : ''}
+        <dt>Loaded nodes</dt><dd>${nLoad} <small>in the ${M.activeCombination ? 'combination' : 'active case'}</small></dd>
         ${det}
       </dl>
       <div class="tip"><ul>
@@ -1765,7 +1882,7 @@
       if (dup && dup !== e) { el.classList.add('invalid'); toast('Those nodes are already connected', 'warn'); return; }
       pushUndo(); e[f] = nn; modelChanged(); return;
     }
-    if (['fx', 'fy', 'fmag', 'fang', 'sdx', 'sdy'].includes(f) && refuseGenerated()) return;
+    if (['fx', 'fy', 'fmag', 'fang', 'sdx', 'sdy'].includes(f) && refuseEntry()) return;
     pushUndo();
     switch (f) {
       case 'x': n.x = v; break;
@@ -1805,7 +1922,7 @@
       pushUndo(); ns.forEach((n) => setSupport(n, q('stype').value, ang));
       toast(`Support applied to ${plural(ns.length, 'node')}`, 'ok'); modelChanged();
     } else if (act === 'mm-load') {
-      if (refuseGenerated()) return;
+      if (refuseEntry()) return;
       const fx = readNum(q('fx')), fy = readNum(q('fy')); if (fx === null || fy === null) return;
       pushUndo(); ns.forEach((n) => setNodeLoad(state.model, n, fx * fU(), fy * fU()));
       toast(`Load applied to ${plural(ns.length, 'node')}`, 'ok'); modelChanged();
@@ -1981,6 +2098,24 @@
       : `Total ${fF(sw.total)} ${fu} from ${sw.counted} of ${sw.members} members only, before λ.`;
     return `<div class="sub-h">Self-weight (generated)</div>${missing}<p class="note">Each member weighs W = ρ·A·L·g: its material's density, its section area, its length, and g = ${GRAVITY} m/s². Half of W acts downward at each end node. ${total} Recalculated whenever the geometry, a section or a material changes.</p>`;
   }
+  /**
+   * The health report's account of the combination on screen: what it adds up, that it is solved as one complete
+   * action state, and the worst case over every combination, each one's own result (never summed across cases).
+   */
+  function combinationBlock() {
+    const M = state.model, c = M.activeCombination, runs = state.comboRuns || [];
+    let h = `<div class="sub-h">Combination “${esc(c.name)}”</div><p class="note">${esc(combinationText(c))}. The factored loads F = λ·Σ γᵢ·Fᵢ and settlements u<sub>s</sub> = λ·Σ γᵢ·u<sub>s,i</sub> are added up first and solved directly as one action state, so every result shown is the solver's for the combined actions. Safety factors are never added across load cases.</p>`;
+    if (selfWeightAnalysed() && !selfWeightSummary(M).complete) h += `<p class="note warn-note">Incomplete self-weight: some members have no density, so their weight is not in this combination. Enter the density ρ under Materials.</p>`;
+    if (!runs.length) return h;
+    const env = combinationEnvelope(M, runs), sfCls = (v) => (v < 1 ? 'bad' : v < state.s.targetSF ? 'warn' : 'ok');
+    h += `<div class="sub-h">All combinations, each solved on its own (λ = ${fmt(state.s.loadFactor, 4)})</div><ul class="risk-list">${runs.map(({ combination: x, result: r }, i) => {
+      const sm = r.ok && r.summary, mf = sm ? sm.minSF : null;
+      return `<li data-combo="${i}" title="Show this combination"><span>${esc(x.name)}${x === c ? ' (shown)' : ''}</span><span class="${mf ? sfCls(mf.value) : 'bad'}">${mf ? `SF ${fmt(mf.value, 3)}${mf.member >= 0 ? ` at M${mf.member + 1} (${mf.governs})` : ''}` : r.mechanism ? 'unstable' : 'not solved'}</span></li>`;
+    }).join('')}</ul>`;
+    if (env.governing) h += `<p class="note">Governing: SF ${fmt(env.governing.value, 3)} at M${env.governing.member + 1} (${env.governing.governs}) in “${esc(env.governing.combination.name)}”, the lowest of the combinations' own results.</p>`;
+    if (env.unsolved.length) h += `<p class="note warn-note">${plural(env.unsolved.length, 'combination')} could not be solved, so no result covers every combination.</p>`;
+    return h;
+  }
   function renderHealth() {
     const box = $('#health');
     const r = state.res, fu = state.s.forceUnit, du = state.s.dispUnit;
@@ -1997,6 +2132,7 @@
       } else {
         h += `<div class="health-status warn"><span class="ic">!</span><div>Model cannot be analysed<small>Fix the issues below.</small></div></div>`;
       }
+      if (state.model.activeCombination) h += combinationBlock();
       h += stabilityBlock(r);
       if (r.errors.length) h += `<div class="sub-h">Errors</div><ul class="msg-list">${msgs(r.errors.filter((m) => !r.mechanism || !/kinematically unstable/.test(m.msg)), 'e')}</ul>`;
       { // model checks (validateModel) first, then the solver's warnings, then notes from reading the current file
@@ -2025,7 +2161,8 @@
       <dt>Members</dt><dd>${c.tension} T · ${c.compression} C · ${c.zero} zero</dd>
       <dt>Status</dt><dd>${c.safe} safe · <span class="${c.yielded ? 'check-bad' : ''}">${c.yielded} yielded</span> · <span class="${c.buckled ? 'check-bad' : ''}">${c.buckled} buckled</span></dd>
     </dl>`;
-    if (isGeneratedCase(state.model.activeCase)) h += selfWeightBlock();
+    if (state.model.activeCombination) h += combinationBlock();
+    else if (isGeneratedCase(state.model.activeCase)) h += selfWeightBlock();
     h += `<div class="sub-h">Buckling risk <span style="text-transform:none">(P<sub>cr</sub>/|F| &lt; ${fmt(Math.max(state.s.targetSF, 1), 3)})</span></div>`;
     if (sm.bucklingRisk.length) {
       h += `<ul class="risk-list">${sm.bucklingRisk.slice(0, 12).map((b) => {
@@ -2084,6 +2221,13 @@
       if (obj) selectOnly(type, obj);
     }));
     box.querySelectorAll('[data-mode]').forEach((el) => el.addEventListener('click', () => { state.mechMode = +el.dataset.mode; refreshStatus(); requestRender(); }));
+    box.querySelectorAll('[data-combo]').forEach((el) => el.addEventListener('click', () => {
+      const c = state.model.combinations[+el.dataset.combo];
+      if (!c || c === state.model.activeCombination) return;
+      setActiveCombination(state.model, c); // choosing what to look at: no undo step
+      renderLoadCases();
+      modelChanged();
+    }));
   }
 
   /* =====================================================================
@@ -2341,6 +2485,36 @@
     return { generated: 'self-weight', selfWeight: 'W = rho*A*L*g per member, W/2 downward at each end node', g: GRAVITY,
       complete: sw.complete, totalBeforeLoadFactor_N: sw.total, membersWithoutDensity: sw.missing.map((k) => k + 1) };
   }
+  /** How a report names the combination it analyses: its factors, the rule, and its self-weight when it has one. */
+  function combinationMeta(M, c) {
+    const meta = { id: M.combinations.indexOf(c) + 1, name: c.name,
+      terms: c.terms.map((t) => ({ loadCase: M.loadCases.indexOf(t.loadCase) + 1, name: t.loadCase.name, factor: t.factor })),
+      rule: 'F = loadFactor * sum(gamma_i * F_i) and u_s = loadFactor * sum(gamma_i * u_s,i), solved directly as one action state' };
+    if (c.terms.some((t) => isGeneratedCase(t.loadCase) && t.factor !== 0)) meta.selfWeight = selfWeightMeta(M);
+    return meta;
+  }
+  /** Every combination solved on its own, with each one's results and the worst case over them (nothing is summed). */
+  function combinationResultsObject(M, loadFactor) {
+    const runs = M.combinations.map((c) => ({ combination: c, result: analyzeCombination(M, c, { loadFactor, targetSF: state.s.targetSF }) }));
+    const env = combinationEnvelope(M, runs), id = (c) => (c ? M.combinations.indexOf(c) + 1 : null);
+    return {
+      rule: "each combination is solved directly from its complete action state; the governing value is the lowest safety factor among the combinations' own results; safety factors are never added",
+      loadFactor,
+      combinations: runs.map(({ combination: c, result: r }) => ({
+        id: id(c), name: c.name, terms: combinationMeta(M, c).terms, status: r.ok ? 'solved' : r.mechanism ? 'unstable' : 'invalid',
+        criticalSF: r.ok ? jnum(r.summary.minSF.value) : null, criticalMember: r.ok && r.summary.minSF.member >= 0 ? r.summary.minSF.member + 1 : null, criticalMode: r.ok ? r.summary.minSF.governs : null,
+        members: r.ok ? r.members.map((m, k) => ({ id: k + 1, force: m.force, sf: jnum(m.sf), governs: m.governs, status: m.status })) : [],
+        reactions: r.ok ? r.nodes.map((n, i) => ({ node: i + 1, Rx: n.rx, Ry: n.ry, restrained: n.restrained[0] || n.restrained[1] })).filter((n) => n.restrained).map(({ node, Rx, Ry }) => ({ node, Rx, Ry })) : [],
+      })),
+      members: env.members.map((x, k) => ({
+        id: k + 1, minSF: x.minSF ? jnum(x.minSF.value) : null, minSFMode: x.minSF ? x.minSF.governs : null, minSFCombination: id(x.minSF && x.minSF.combination),
+        maxTension_N: x.maxTension ? x.maxTension.value : null, maxTensionCombination: id(x.maxTension && x.maxTension.combination),
+        maxCompression_N: x.maxCompression ? x.maxCompression.value : null, maxCompressionCombination: id(x.maxCompression && x.maxCompression.combination),
+      })),
+      governing: env.governing ? { criticalSF: jnum(env.governing.value), member: env.governing.member + 1, mode: env.governing.governs, combination: id(env.governing.combination), name: env.governing.combination.name } : null,
+      complete: env.complete,
+    };
+  }
   function reportObject(r) {
     const M = state.model;
     const D = r.diagnostics || {};
@@ -2348,7 +2522,8 @@
     const inp = toAnalysisInput(M, { loadFactor: r.loadFactor });
     const obj = {
       meta: { app: 'TrussLab 2D Truss FEA & Load Simulator', solver: FEA.VERSION, generated: new Date().toISOString(), units: 'SI base units: m, N, Pa, m^2, m^4; angles in degrees',
-        loadCase: Object.assign({ id: M.loadCases.indexOf(M.activeCase) + 1, name: M.activeCase.name }, isGeneratedCase(M.activeCase) ? selfWeightMeta(M) : {}), loadFactor: r.loadFactor, loadFactorScales: 'nodal loads and prescribed settlements', targetSF: state.s.targetSF },
+        loadCase: M.activeCombination ? null : Object.assign({ id: M.loadCases.indexOf(M.activeCase) + 1, name: M.activeCase.name }, isGeneratedCase(M.activeCase) ? selfWeightMeta(M) : {}),
+        combination: M.activeCombination ? combinationMeta(M, M.activeCombination) : null, loadFactor: r.loadFactor, loadFactorScales: 'nodal loads and prescribed settlements', targetSF: state.s.targetSF },
       model: serialize(M),
       status: r.ok ? 'solved' : r.mechanism ? 'unstable' : 'invalid',
       errors: r.errors.map((e) => e.msg), warnings: validateModel(M).map((w) => w.msg).concat(r.warnings.map((w) => w.msg)),
@@ -2390,6 +2565,7 @@
     } else if (r.mechanism) {
       obj.mechanismModes = r.mechanism.modes.map((m, i) => ({ mode: i + 1, kind: m.kind, description: m.description, nodes: m.nodes.map((k) => k + 1), shape: Array.from(m.u) }));
     }
+    if (M.combinations.length) obj.combinationResults = combinationResultsObject(M, r.loadFactor);
     return obj;
   }
   function exportReportJSON() { const r = requireResults(true); if (!r) return; download(`${baseName()}-report-${stamp()}.json`, 'application/json', JSON.stringify(reportObject(r), null, 2)); }
@@ -2402,9 +2578,10 @@
     L.push(csvRow(['# units', o.meta.units]));
     L.push(csvRow(['title', state.model.title]));
     L.push(csvRow(['status', o.status]));
-    const lcm = o.meta.loadCase;
-    L.push(csvRow(['load case', lcm.name].concat(lcm.generated ? [`generated self-weight: ${lcm.selfWeight}, g = ${lcm.g} m/s^2`] : [])));
-    if (lcm.generated) L.push(csvRow(['self-weight before load factor [N]', lcm.totalBeforeLoadFactor_N,
+    const cm = o.meta.combination, lcm = cm ? cm.selfWeight || null : o.meta.loadCase;
+    if (cm) L.push(csvRow(['combination', cm.name, combinationText(state.model.activeCombination), 'solved directly as one action state']));
+    else L.push(csvRow(['load case', lcm.name].concat(lcm.generated ? [`generated self-weight: ${lcm.selfWeight}, g = ${lcm.g} m/s^2`] : [])));
+    if (lcm && lcm.generated) L.push(csvRow([cm ? 'self-weight case before factors [N]' : 'self-weight before load factor [N]', lcm.totalBeforeLoadFactor_N,
       lcm.complete ? 'complete: every member has a density' : `incomplete: no density for members ${lcm.membersWithoutDensity.map((k) => `M${k}`).join(' ')}`]));
     L.push(csvRow(['load factor', r.loadFactor, 'scales nodal loads and prescribed settlements']));
     L.push(csvRow(['target SF', state.s.targetSF]));
@@ -2447,6 +2624,13 @@
       L.push(''); L.push('MECHANISM MODES'); L.push(csvRow(['mode', 'kind', 'description', 'nodes']));
       o.mechanismModes.forEach((m) => L.push(csvRow([m.mode, m.kind, m.description, m.nodes.join(' ')])));
     }
+    if (o.combinationResults) {
+      const cr = o.combinationResults;
+      L.push(''); L.push('COMBINATIONS'); L.push(csvRow([`# ${cr.rule}`]));
+      L.push(csvRow(['id', 'name', 'factors', 'status', 'critical_SF', 'critical_member', 'mode']));
+      cr.combinations.forEach((c, i) => L.push(csvRow([c.id, c.name, combinationText(state.model.combinations[i]), c.status, c.criticalSF === null ? '' : c.criticalSF, c.criticalMember ? `M${c.criticalMember}` : '', c.criticalMode || ''])));
+      if (cr.governing) L.push(csvRow(['governing', cr.governing.name, '', '', cr.governing.criticalSF, `M${cr.governing.member}`, cr.governing.mode]));
+    }
     L.push(''); L.push('DIAGNOSTICS'); L.push(csvRow(['quantity', 'value']));
     const d = o.diagnostics;
     if (o.determinacy) L.push(csvRow(['Maxwell m + r - 2j', o.determinacy.degree]));
@@ -2463,8 +2647,9 @@
     if (!r.K) { toast('Matrices are not available: ' + firstMsg(r), 'bad'); return; }
     const freeL = Array.from(r.free, (d) => r.dofLabels[d]);
     const o = {
-      meta: Object.assign({ generated: new Date().toISOString(), units: 'K in N/m, F and R in N, u in m', loadCase: state.model.activeCase.name, loadFactor: r.loadFactor, note: 'DOF labels: node number + axis; a prime marks a rotated support frame' },
-        isGeneratedCase(state.model.activeCase) ? { selfWeight: selfWeightMeta(state.model) } : {}),
+      meta: Object.assign({ generated: new Date().toISOString(), units: 'K in N/m, F and R in N, u in m', loadCase: state.model.activeCombination ? null : state.model.activeCase.name, loadFactor: r.loadFactor, note: 'DOF labels: node number + axis; a prime marks a rotated support frame' },
+        state.model.activeCombination ? { combination: combinationMeta(state.model, state.model.activeCombination) } : {},
+        selfWeightAnalysed() ? { selfWeight: selfWeightMeta(state.model) } : {}),
       dofLabels: r.dofLabels, K: matrixToRows(r.K, r.ndof),
       Krotated: r.rotated.length ? matrixToRows(r.Kt, r.ndof) : null,
       freeDOFs: freeL, restrainedDOFs: Array.from(r.fixed, (d) => r.dofLabels[d]),
@@ -2483,7 +2668,7 @@
       for (let a = 0; a < n; a++) L.push(csvRow([labels[a], ...Array.from(M.subarray(a * n, a * n + n))]));
       L.push('');
     };
-    L.push(csvRow(['# TrussLab system matrices', new Date().toISOString(), 'K in N/m; F, R in N; u in m', `load case ${state.model.activeCase.name}`, `load factor ${r.loadFactor}`]));
+    L.push(csvRow(['# TrussLab system matrices', new Date().toISOString(), 'K in N/m; F, R in N; u in m', state.model.activeCombination ? `combination ${state.model.activeCombination.name} = ${combinationText(state.model.activeCombination)}` : `load case ${state.model.activeCase.name}`, `load factor ${r.loadFactor}`]));
     L.push('');
     block('GLOBAL STIFFNESS MATRIX K [N/m]', r.K, r.ndof, r.dofLabels);
     if (r.rotated.length) block("ROTATED GLOBAL MATRIX K' = L K L^T [N/m]", r.Kt, r.ndof, r.dofLabels);

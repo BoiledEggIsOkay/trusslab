@@ -65,13 +65,20 @@ So the partition reads K_ff u_f = λF_f − K_fs(λu_s), and the reactions R = K
 - **Tests.** `test/model.test.js` ("Load factor λ scales nodal loads and settlements alike") checks λ = 0.5, 2.5 and 0 against λ·(the λ = 1 result) and the mechanism at λ = 0. The nine examples are checked at λ = 1 against `test/fixtures/examples-baseline.js`, which is unchanged from milestone 2: at λ = 1 the old and new rules give identical solver input.
 - **Version 1 models.** Before milestone 3, λ scaled loads but not settlements. A version 1 model with a settlement therefore gives different results at λ ≠ 1; the page tells the user once (see `model-format.md` §5).
 
-## 5. Solving load combinations (milestone 5)
+## 5. Solving load combinations (milestone 5, done)
 
 For each combination c with factors γ_i on load cases i:
 - F_c = Σ γ_i F_i and u_s,c = Σ γ_i u_s,i (prescribed settlements);
 - call `FEA.analyze()` once on (F_c, u_s,c), and keep the complete result.
 
 Superposing u and N would be valid for a linear model, but the workflow solves each combination directly so that every reported number is one the solver produced. Safety factors, utilisations and classifications are never added up (see `design-conventions.md` §3).
+
+How the code does it:
+- `combinationLoads(model, c)` and `combinationSettlements(model, c)` add γᵢ·Fᵢ and γᵢ·u_s,ᵢ node by node, in load-case order, starting from 0. The self-weight case enters through `caseLoads`, so its loads are the ones computed now from the members. Settlements are added along each support's own axes x′, y′, which every case shares, because supports do not belong to load cases.
+- `toAnalysisInput(model, { combination: c, loadFactor: λ })` (or with c active, by default) then multiplies the combined state by λ once: `fx = λ·Σγᵢ·F_x,i`, `dy = λ·Σγᵢ·δ_y′,i` on a fixed axis. λ is never applied to the factors and again to the sum. For a single case with γ = 1 the input is bit-identical to the case's own input, since 0 + 1·F = F.
+- `analyzeCombination(model, c, opts)` calls `FEA.analyze()` on that input, for any combination, active or not; `analyzeCombinations(model, opts)` solves every combination on its own and returns one complete result per combination. Neither changes the model. Stability does not depend on the actions, so a mechanism is unstable in every combination, at any factors.
+- Zero factors contribute exactly nothing; negative factors reverse a case; opposite loads cancel exactly.
+- Tests: `test/model.test.js` ("Combination actions…", "Combinations of prescribed settlements…", "Each combination is solved from its complete action state…", "Non-active combinations…", "Combinations on the nine examples"). One test keeps the reason visible: a member at SF 6.0 (yield, tension) in one case and 2.53 (buckling, compression) in another has SF 24.0 in their sum, solved directly; adding utilisations would claim 1.78.
 
 ## 6. Self-weight (milestone 4, done)
 

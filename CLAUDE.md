@@ -10,8 +10,10 @@ Load the matching skill before you start; they hold the detail this file only su
 - `trusslab-architecture`: files, globals, script order, and the rules for DOM-free code.
 - `trusslab-engineering-rules`: the structural model, units, signs and engineering restrictions, with references for the model and save-file format, the analysis mathematics, and the design conventions.
 - `trusslab-testing`: the headless suites, the browser smoke test, regression-test discipline, and `scripts/check.sh`.
+- `trusslab-ui-design`: information architecture, visual hierarchy, design tokens, accessibility, keyboard and responsive rules for the TrussLab interface, the element names and wording the smoke test relies on, and the process for the UI/UX redesign milestone. Use it before any change to `index.html`, `style.css` or the page-facing parts of `script.js`, for wireframes and mock-ups, and for any educational interface.
+- `frontend-design`: Anthropic's general skill for deliberate, non-generic visual design, vendored unmodified under Apache 2.0 (source, commit and hashes in its `UPSTREAM.md`). Read it through `trusslab-ui-design`, which takes precedence for TrussLab. Never edit the vendored files.
 
-Skills for the user interface and for education will be added when those systems are built.
+A skill for the education system will be added when that system is built.
 
 ## Hard constraints
 
@@ -62,11 +64,18 @@ Next, strictly one at a time, each approved before the next begins:
    - exported calculation-report files, which nest the model under `model`.
 4. Material density and a generated self-weight load case.
 5. Load combinations solved directly, with worst-case results.
-6. Prediction mode and worked calculations in the Inspector.
-7. Free-body diagram of a joint (method of joints).
-8. Solver Explorer for small models.
-9. Section sizing. The design deflection check comes only after a physically appropriate deflection measure has been agreed and documented (see Engineering restrictions).
-10. A small lesson format and the first lessons.
+6. UI/UX redesign, before any educational interface (follow `trusslab-ui-design`):
+   - audit the complete existing UI and identify the sources of unnecessary complexity;
+   - propose three distinct design directions, with wireframes and a design-token system;
+   - redesign navigation and workspace organisation, and explore a unified Learn, Analyze and Design experience;
+   - keep the numerical engine and the application architecture unchanged;
+   - present the proposed design for approval before changing the GUI;
+   - then implement incrementally, with browser screenshot reviews and regression testing at every step.
+7. Prediction mode and worked calculations in the Inspector.
+8. Free-body diagram of a joint (method of joints).
+9. Solver Explorer for small models.
+10. Section sizing. The design deflection check comes only after a physically appropriate deflection measure has been agreed and documented (see Engineering restrictions).
+11. A small lesson format and the first lessons.
 
 Not planned for now: an AI tutor, beam or frame elements, 3D, dynamics, brute-force optimisation, automated grading of written reasoning, gamification.
 

@@ -31,8 +31,8 @@ TrussLab teaches from the operations its solver really performs. Every number sh
 | 3 Load cases | Every prescribed action (nodal forces and settlements) belongs to a load case; supports keep only restraint geometry. λ scales the whole combined action, settlements included. File format version 2 keeps reading version 1 files, autosaved sessions and report files | `model-format.md` §5, `analysis-math.md` §4 |
 | 4 Self-weight | Generated dead-load case: W = ρAL·g, half to each end node, gravity −y, recomputed after section changes. No distributed loads | `analysis-math.md` §6 |
 | 5 Combinations | Solve each combination's factored state directly; design checks take the worst governing value | `analysis-math.md` §5, `design-conventions.md` §3 |
-| 9 Sizing | Discrete candidates per section group, sorted by ρA; iterate with a cap, cycle detection and an explicit not-converged result | `design-conventions.md` §4 |
-| 9 Deflection | Only after a physically appropriate measure is agreed and documented | `design-conventions.md` §5 |
+| 10 Sizing | Discrete candidates per section group, sorted by ρA; iterate with a cap, cycle detection and an explicit not-converged result | `design-conventions.md` §4 |
+| 10 Deflection | Only after a physically appropriate measure is agreed and documented | `design-conventions.md` §5 |
 
 ## References: read the one you need
 

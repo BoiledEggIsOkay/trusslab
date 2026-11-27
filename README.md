@@ -126,3 +126,7 @@ The test reads the app through `window.TrussLabTest`, a small adapter that `scri
 - Linear (small-displacement) theory: equilibrium is written in the undeformed geometry.
 - Euler buckling assumes ideal pin-ended members (K = 1) about the axis of the entered I. If σ_cr exceeds σy, yielding governs. Code resistance factors and inelastic buckling are not applied.
 - Douglas Fir limit stress: timber has no yield point. The preset uses 49.9 MPa, the clear-wood compressive strength parallel to grain at 12 % moisture content ([USDA Wood Handbook](https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr190/chapter_05.pdf), coast Douglas-fir). Graded lumber design values are much lower, so edit this for your grade and design code.
+
+## Licence
+
+TrussLab is released under MIT-0 (see `LICENCE.md`). Third-party material in this repository keeps its own licence and is listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

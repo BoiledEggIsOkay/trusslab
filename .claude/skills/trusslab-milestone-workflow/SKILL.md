@@ -23,7 +23,7 @@ Before editing, give a short plan: the goal, the files you will change, the appr
 
 ## 4. Implement
 
-- Follow `trusslab-architecture` for where code goes and `trusslab-engineering-rules` for anything that computes or presents results.
+- Follow `trusslab-architecture` for where code goes, `trusslab-engineering-rules` for anything that computes or presents results, and `trusslab-ui-design` for anything visible on the page.
 - Bug fix: write the regression test first and show that it fails on the unfixed code, then fix the code and show that it passes. A test that was never seen failing has not been shown to detect the bug.
 - Refactor: no change in behaviour. Prove it with tests that compare results before and after (exact equality where the computation is deterministic).
 - Keep `window.TrussLab`, the file format and the autosaved-session format working unless the milestone changes them on purpose, with migration.

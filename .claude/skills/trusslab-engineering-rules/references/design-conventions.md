@@ -1,6 +1,6 @@
 # Design conventions
 
-Contents: 1 Member checks · 2 Material limit stresses · 3 Results over combinations · 4 Section sizing (milestone 9) · 5 Deflection · 6 Presenting results to learners · 7 Educational analysis and code-compliant design
+Contents: 1 Member checks · 2 Material limit stresses · 3 Results over combinations · 4 Section sizing (milestone 10) · 5 Deflection · 6 Presenting results to learners · 7 Educational analysis and code-compliant design
 
 ## 1. Member checks (as `fea-core.js` computes them)
 
@@ -22,7 +22,7 @@ A design check evaluates every required combination separately (each solved dire
 
 Never add safety factors, utilisations or member classifications across load cases or combinations. They are not linear in the loads, and a sum has no physical meaning.
 
-## 4. Section sizing (milestone 9)
+## 4. Section sizing (milestone 10)
 
 - Use discrete candidate sections, organised by the existing section groups and sorted by linear mass m′ = ρA. Never brute-force combinations of sections across members.
 - For each group, choose the lightest candidate that passes the strength and buckling checks in every required combination.
@@ -43,7 +43,7 @@ The reason: `summary.spanRatio` is (x_max − x_min) / max_i |u_i|. That is the 
 - mixes horizontal and vertical movement;
 - uses a "span" that is meaningless for cantilevers and towers.
 
-It may keep appearing as an informational value. When the measure is redefined in milestone 9, make the allowable ratio configurable and never invent a universal limit.
+It may keep appearing as an informational value. When the measure is redefined in milestone 10, make the allowable ratio configurable and never invent a universal limit.
 
 ## 6. Presenting results to learners
 

@@ -588,6 +588,66 @@
       after.ok && after.nodes[1].uy === -5 * 1e-3 && sameResults(before, after));
   });
 
+  scenario('Self-weight: a generated load case, W = ρ·A·L·g with half at each end node, recalculated after every change', async () => {
+    await loadExample('aframe'); // two 5 m steel bars, A = 1000 mm²: each weighs 7850 · 0.001 · 5 · 9.80665 = 384.9110125 N
+    const g = 9.80665, cases = () => model().loadCases, active = () => model().activeLoadCase;
+    const sumRy = (r) => r.nodes.reduce((t, n) => t + n.ry, 0);
+    const total = () => { // Σ ρ·A·L·g from the model on screen
+      const f = model();
+      return f.members.reduce((t, e) => {
+        const a = f.nodes[e.n1 - 1], b = f.nodes[e.n2 - 1], sec = f.sections[e.section - 1];
+        return t + f.materials[sec.material - 1].density * sec.A * Math.hypot(b.x - a.x, b.y - a.y) * g;
+      }, 0);
+    };
+    must('one load case, no self-weight case yet, and "+ Self-weight case" is enabled', cases().length === 1 && !el('#btnAddSelfWeight').disabled && el('#selfWeightNote').hidden);
+    const mi = model().sections[model().members[0].section - 1].material - 1, densitySel = `#materialsList .mat-card[data-mi="${mi}"] [data-mf="density"]`;
+    must('the material card shows the steel density, 7850 kg/m³', !!el(densitySel) && el(densitySel).value === '7850');
+    const before = T.results();
+    press('#btnAddSelfWeight'); await settle();
+    check('the button adds a generated case named "Self-weight" and makes it active; the button is then disabled',
+      cases().length === 2 && cases()[1].generated === 'self-weight' && cases()[1].name === 'Self-weight' && active() === 2 && el('#btnAddSelfWeight').disabled);
+    check('the case list marks it as generated, and a note explains it', /Self-weight \(generated\)/.test(el('#selLoadCase').innerHTML) && !el('#selfWeightNote').hidden);
+    check('no loads are stored with it: they are computed from the members', cases()[1].loads.length === 0 && cases()[1].settlements.length === 0);
+    near('the reactions carry the whole weight: ΣR_y = 2 × 384.9110125 N', sumRy(T.results()), 2 * 384.9110125, 1e-12);
+    near('... and each rafter carries −W / (2 sin θ) = −240.569382813 N from the apex load W', T.results().members[0].force, -384.9110125 / 1.6, 1e-12);
+    check('the health report says where the loads come from', /Self-weight \(generated\)/.test(text('#health')) && /ρ·A·L·g/.test(text('#health')));
+    key('l'); setValue('#toFx', '0'); setValue('#toFy', '-10'); setValue('#toLoadMode', 'set');
+    const stored = JSON.stringify(cases());
+    await click(3, 4);
+    check('the Load tool puts nothing into the generated case', JSON.stringify(cases()) === stored && cases()[1].loads.length === 0);
+    key('v');
+    await click(3, 4);
+    check('the Inspector shows the apex load read-only, with where it comes from, and no load fields',
+      /Self-weight load in/.test(text('#inspector')) && /Half the weight of each member/.test(text('#inspector')) && !/data-f="(fx|fy|fmag|fang|sdx|sdy)"/.test(el('#inspector').innerHTML));
+    must('the apex Y field is shown', !!el('#inspector [data-f="y"]'));
+    setValue('#inspector [data-f="y"]', '8'); await settle(); // geometry: both bars become √73 m long
+    near('moving the apex recalculates the weight: ΣR_y = Σρ·A·L·g with the new lengths', sumRy(T.results()), total(), 1e-12);
+    near('... which is 2 · 7850 · 0.001 · √73 · g', total(), 2 * 7850 * 0.001 * Math.sqrt(73) * g, 1e-12);
+    ctrl('z'); await settle();
+    near('Ctrl+Z moves it back, and the weight with it', sumRy(T.results()), 2 * 384.9110125, 1e-12);
+    setValue(densitySel, '15700'); await settle();
+    near('doubling the steel density doubles the self-weight (recalculated at once)', sumRy(T.results()), 4 * 384.9110125, 1e-12);
+    ctrl('z'); await settle();
+    check('Ctrl+Z restores the density', el(densitySel).value === '7850' && Math.abs(sumRy(T.results()) / (2 * 384.9110125) - 1) < 1e-12);
+    setValue('#numLoadFactor', '2'); await settle();
+    near('λ = 2 doubles the self-weight reactions', sumRy(T.results()), 4 * 384.9110125, 1e-12);
+    setValue('#numLoadFactor', '1'); await settle();
+    await click(1.5, 2);
+    check('selecting a member shows its weight with the numbers: W = ρ·A·L·g = 7850 kg/m³ × 1000 mm² × 5 m × 9.80665 m/s²',
+      /W = ρ·A·L·g/.test(text('#inspector')) && /7850 kg\/m³/.test(text('#inspector')) && /9\.80665 m\/s²/.test(text('#inspector')));
+    setValue('#selLoadCase', '0'); await settle();
+    check('"Load case 1" is unchanged: the same 100 kN apex load and exactly the same results as before',
+      active() === 1 && cases()[0].loads[0].fy === -100000 && T.results().members.every((m, i) => m.force === before.members[i].force) && el('#selfWeightNote').hidden);
+    T.saveNow();
+    const rr = T.reloadStoredSession(); await settle();
+    check('after saving and reloading the session the case is still generated, and nothing was stored with it',
+      rr.restored && cases().length === 2 && cases()[1].generated === 'self-weight' && cases()[1].loads.length === 0);
+    setValue('#selLoadCase', '1'); await settle();
+    near('... and it gives the same self-weight results', sumRy(T.results()), 2 * 384.9110125, 1e-12);
+    press('#btnDeleteCase'); await settle();
+    check('deleting it leaves "Load case 1", and the button is enabled again', cases().length === 1 && active() === 1 && !el('#btnAddSelfWeight').disabled);
+  });
+
   scenario('Opening version 1 files: the λ notice appears only with a settlement, and stays dismissed', async () => {
     if (typeof DataTransfer !== 'function') { skip('opening files', 'this browser cannot build a file list (no DataTransfer)'); return; }
     must('the notice is hidden to start with', el('#updateNotice').hidden);

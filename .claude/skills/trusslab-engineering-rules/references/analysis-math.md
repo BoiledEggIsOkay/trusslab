@@ -73,9 +73,15 @@ For each combination c with factors γ_i on load cases i:
 
 Superposing u and N would be valid for a linear model, but the workflow solves each combination directly so that every reported number is one the solver produced. Safety factors, utilisations and classifications are never added up (see `design-conventions.md` §3).
 
-## 6. Self-weight (milestone 4)
+## 6. Self-weight (milestone 4, done)
 
-- Materials need a density ρ (kg/m³). A member weighs W = ρ·A·L·g, with g = 9.80665 m/s² (state the value used). Gravity acts in −y.
-- Self-weight is its own generated dead-load case. Each end node receives W/2: F_y,1 = F_y,2 = −ρALg/2.
+- Materials need a density ρ (kg/m³). A member weighs W = ρ·A·L·g, with g = 9.80665 m/s² (standard gravity, `TrussModel.GRAVITY`; state the value used). Gravity acts in −y. Units: kg/m³ · m² · m · m/s² = kg·m/s² = N.
+- Self-weight is its own generated dead-load case. Each end node receives W/2: F_y,1 = F_y,2 = −ρALg/2, F_x = 0. For a pin-ended member these are the end reactions of its own uniform weight (statics, by symmetry), so applying them at the joints is the statically equivalent lumping: the truss stays axial-only, and the member's own bending between its ends is not modelled.
 - Regenerate it after any change to a section, material, or node coordinates, because it depends on the current A, ρ and L.
 - No distributed loads in this milestone. The equivalent end loads above are the whole treatment.
+
+How the code does it:
+- `memberSelfWeight(member)` returns `{ density, A, L, g, W }`, with L = hypot(Δx, Δy) (the same length the solver uses) and W = 0 when the material has no density (`density` is then `null`).
+- `selfWeightLoads(model)` adds −W/2 to both end nodes of every member, in member order, and returns `Map(node → { fx: 0, fy })` with non-zero entries only. It is called on every read (`caseLoads`, so `nodeLoad` and `toAnalysisInput`), never stored: "regenerate after any change" holds by construction, and repeated computation cannot accumulate.
+- `toAnalysisInput(model, { loadFactor: λ, loadCase: selfWeightCase })` multiplies these loads by λ like any other (§4). The case has no settlements.
+- For milestone 5, the self-weight case is an ordinary member of `model.loadCases` with a uid, so a combination can name it and take γ·F from `caseLoads` like any other case. Combinations are not implemented.

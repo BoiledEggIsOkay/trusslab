@@ -22,7 +22,7 @@ A feature that truly needs a network goes into the documentation as an optional 
 | File | Role | Global |
 |---|---|---|
 | `fea-core.js` | Numerical engine, no DOM | `FEA` (plus `module.exports` under Node) |
-| `model.js` | DOM-free model layer: parser, sections, constructors, supports, serialisation, examples, solver input (`toAnalysisInput`) | `TrussModel` (plus `module.exports` under Node) |
+| `model.js` | DOM-free model layer: parser, sections, constructors, supports, load cases and the generated self-weight case, serialisation, examples, solver input (`toAnalysisInput`) | `TrussModel` (plus `module.exports` under Node) |
 | `script.js` | All page code: one IIFE in numbered sections | `TrussLab` (older hook), `TrussLabTest` (smoke mode only) |
 | `index.html`, `style.css` | Layout, help dialog, theme | none |
 | `test/*.test.js` | Headless suites (jsc or Node) | none |

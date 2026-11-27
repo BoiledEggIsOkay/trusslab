@@ -82,11 +82,17 @@
   /* =====================================================================
    * 2. Materials, sections, model objects
    * ===================================================================== */
+  /**
+   * Densities ρ in kg/m³ (self-weight, milestone 4): structural steel 7850 and 6061-T6 aluminium 2700, the usual
+   * values; coast Douglas fir 540, from its specific gravity 0.48 at 12 % moisture content (USDA Wood Handbook, the
+   * source of its strength) × 1.12 for the water it holds × 1000 kg/m³ = 538, rounded. A custom material has no
+   * density until the user enters one: an invented value would give a wrong self-weight without any warning.
+   */
   const MATERIAL_PRESETS = {
-    steel: { name: 'Structural Steel', E: 200e9, fy: 250e6, color: '#94a3b8' },
-    aluminum: { name: '6061-T6 Aluminum', E: 68.9e9, fy: 276e6, color: '#cbd5e1' },
-    fir: { name: 'Douglas Fir Timber', E: 11e9, fy: 49.9e6, color: '#d6a86b' },
-    custom: { name: 'Custom material', E: 100e9, fy: 200e6, color: '#a78bfa' },
+    steel: { name: 'Structural Steel', E: 200e9, fy: 250e6, density: 7850, color: '#94a3b8' },
+    aluminum: { name: '6061-T6 Aluminum', E: 68.9e9, fy: 276e6, density: 2700, color: '#cbd5e1' },
+    fir: { name: 'Douglas Fir Timber', E: 11e9, fy: 49.9e6, density: 540, color: '#d6a86b' },
+    custom: { name: 'Custom material', E: 100e9, fy: 200e6, density: null, color: '#a78bfa' },
   };
   const FIR_NOTE = 'Timber has no yield point: the limit is the clear-wood compressive strength ∥ grain, 12% MC (USDA Wood Handbook, coast Douglas-fir). Graded-lumber design values are much lower.';
   const GROUP_COLORS = ['#38bdf8', '#f472b6', '#a3e635', '#fb923c', '#c084fc', '#2dd4bf', '#facc15', '#f87171', '#60a5fa', '#e879f9'];
@@ -128,7 +134,7 @@
   const newUid = () => uidSeq++;
   function makeMaterial(key, over) {
     const p = MATERIAL_PRESETS[key] || MATERIAL_PRESETS.custom;
-    return Object.assign({ uid: newUid(), preset: MATERIAL_PRESETS[key] ? key : 'custom', name: p.name, E: p.E, fy: p.fy, color: p.color }, over || {});
+    return Object.assign({ uid: newUid(), preset: MATERIAL_PRESETS[key] ? key : 'custom', name: p.name, E: p.E, fy: p.fy, density: p.density, color: p.color }, over || {});
   }
   function makeGroup(name, material, shape, color, A, I) {
     const g = { uid: newUid(), name, material, shape: Object.assign({ type: 'custom' }, shape || {}), color: color || GROUP_COLORS[0], A: A || 0, I: I || 0 };
@@ -140,9 +146,12 @@
     return { uid: newUid(), x, y, support: { type: 'none', angle: 0, fixX: false, fixY: false } };
   }
   const makeMember = (n1, n2, group) => ({ uid: newUid(), n1, n2, group });
-  /** A load case: nodal loads { fx, fy } (N) and prescribed settlements { dx, dy } (m), keyed by node. */
+  /**
+   * A load case: nodal loads { fx, fy } (N) and prescribed settlements { dx, dy } (m), keyed by node. `generated` is
+   * null for a case the user fills, or SELF_WEIGHT for the generated self-weight case, whose Maps stay empty.
+   */
   function makeLoadCase(name) {
-    return { uid: newUid(), name: name || 'Load case 1', loads: new Map(), settlements: new Map() };
+    return { uid: newUid(), name: name || 'Load case 1', generated: null, loads: new Map(), settlements: new Map() };
   }
   function emptyModel(title) {
     const steel = makeMaterial('steel'), alu = makeMaterial('aluminum'), fir = makeMaterial('fir');
@@ -190,25 +199,85 @@
 
   /* ---------- load cases: nodal loads and prescribed settlements ---------- */
   const caseOf = (model, lc) => lc || model.activeCase;
-  /** Nodal load { fx, fy } in N on `node` in load case `lc` (default: the active case). */
+
+  /* ---------- self-weight (milestone 4): a generated dead-load case ---------- */
+  /** Standard gravity in m/s² (the conventional value, exact by definition), used in W = ρ·A·L·g. */
+  const GRAVITY = 9.80665;
+  /** The `generated` value of the self-weight load case. */
+  const SELF_WEIGHT = 'self-weight';
+  /** A density that can be used: a finite number of kg/m³, 0 or more. Anything else means "not set". */
+  const validDensity = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  const isGeneratedCase = (lc) => !!lc && lc.generated === SELF_WEIGHT;
+  /**
+   * The weight of one member and what it is made of: W = ρ·A·L·g in N, with ρ the density of its section's material
+   * (kg/m³), A the section area (m²), L = hypot(Δx, Δy) its length (m) and g = GRAVITY (m/s²). When the material has
+   * no density, `density` is null and W is 0.
+   */
+  function memberSelfWeight(member) {
+    const d = member.group.material.density, density = validDensity(d) ? d : null;
+    const A = member.group.A, L = Math.hypot(member.n2.x - member.n1.x, member.n2.y - member.n1.y);
+    return { density, A, L, g: GRAVITY, W: density === null ? 0 : density * A * L * GRAVITY };
+  }
+  /**
+   * The nodal loads of the self-weight case, computed now from the current geometry, sections and materials. They
+   * are never stored, so they cannot go stale or add up when recomputed. Each member's weight W acts downward (−y),
+   * half at each end node: the statically equivalent end loads of a pin-ended member's uniform weight. Members whose
+   * material has no density add nothing. Returns Map(node → { fx: 0, fy }) with non-zero entries only.
+   */
+  function selfWeightLoads(model) {
+    const out = new Map();
+    for (const e of model.members) {
+      const half = memberSelfWeight(e).W / 2;
+      if (!(half > 0)) continue;
+      for (const n of [e.n1, e.n2]) {
+        const v = out.get(n);
+        out.set(n, { fx: 0, fy: (v ? v.fy : 0) - half });
+      }
+    }
+    return out;
+  }
+  /** The loads of a load case (default: the active one): its own entries, or for the self-weight case those computed now. */
+  function caseLoads(model, lc) {
+    const c = caseOf(model, lc);
+    return isGeneratedCase(c) ? selfWeightLoads(model) : c.loads;
+  }
+  const selfWeightCase = (model) => model.loadCases.find(isGeneratedCase) || null;
+  /** Adds the generated self-weight case, which does not become active. A model has at most one: if it already has it, that one is returned. */
+  function addSelfWeightCase(model, name) {
+    const have = selfWeightCase(model);
+    if (have) return have;
+    const lc = makeLoadCase(name || 'Self-weight');
+    lc.generated = SELF_WEIGHT;
+    model.loadCases.push(lc);
+    return lc;
+  }
+
+  /** Nodal load { fx, fy } in N on `node` in load case `lc` (default: the active case); generated in the self-weight case. */
   function nodeLoad(model, node, lc) {
-    const v = caseOf(model, lc).loads.get(node);
+    const v = caseLoads(model, lc).get(node);
     return v ? { fx: v.fx, fy: v.fy } : { fx: 0, fy: 0 };
   }
-  /** Sets a nodal load; a zero load removes the entry. */
+  /** Sets a nodal load; a zero load removes the entry. Returns false, changing nothing, in the generated self-weight case. */
   function setNodeLoad(model, node, fx, fy, lc) {
-    const m = caseOf(model, lc).loads;
-    if (fx === 0 && fy === 0) m.delete(node); else m.set(node, { fx, fy });
+    const c = caseOf(model, lc);
+    if (isGeneratedCase(c)) return false;
+    if (fx === 0 && fy === 0) c.loads.delete(node); else c.loads.set(node, { fx, fy });
+    return true;
   }
   /** Prescribed settlement { dx, dy } in m along the support frame axes x′, y′ (rotated by the support angle). */
   function nodeSettlement(model, node, lc) {
     const v = caseOf(model, lc).settlements.get(node);
     return v ? { dx: v.dx, dy: v.dy } : { dx: 0, dy: 0 };
   }
-  /** Sets a prescribed settlement; zero removes the entry. A value on an axis that is not fixed is kept but has no effect. */
+  /**
+   * Sets a prescribed settlement; zero removes the entry. A value on an axis that is not fixed is kept but has no
+   * effect. Returns false, changing nothing, in the generated self-weight case (it holds no settlements).
+   */
   function setNodeSettlement(model, node, dx, dy, lc) {
-    const m = caseOf(model, lc).settlements;
-    if (dx === 0 && dy === 0) m.delete(node); else m.set(node, { dx, dy });
+    const c = caseOf(model, lc);
+    if (isGeneratedCase(c)) return false;
+    if (dx === 0 && dy === 0) c.settlements.delete(node); else c.settlements.set(node, { dx, dy });
+    return true;
   }
   function nextCaseName(model) {
     const names = new Set(model.loadCases.map((c) => c.name));
@@ -256,11 +325,14 @@
       format: 'trusslab-model', version: FORMAT_VERSION,
       units: { length: 'm', force: 'N', stress: 'Pa', area: 'm^2', inertia: 'm^4', angle: 'deg' },
       title: model.title,
-      materials: model.materials.map((m, i) => ({ id: i + 1, name: m.name, preset: m.preset, E: m.E, fy: m.fy, color: m.color })),
+      materials: model.materials.map((m, i) => ({ id: i + 1, name: m.name, preset: m.preset, E: m.E, fy: m.fy, density: validDensity(m.density) ? m.density : null, color: m.color })),
       sections: model.groups.map((g, i) => ({ id: i + 1, name: g.name, material: mi.get(g.material), A: g.A, I: g.I, shape: Object.assign({}, g.shape), color: g.color })),
       nodes: model.nodes.map((n, i) => ({ id: i + 1, x: n.x, y: n.y, support: { type: n.support.type, angle: n.support.angle, fixX: n.support.fixX, fixY: n.support.fixY } })),
       members: model.members.map((e, i) => ({ id: i + 1, n1: ni.get(e.n1), n2: ni.get(e.n2), section: gi.get(e.group) })),
-      loadCases: model.loadCases.map((lc, i) => ({ id: i + 1, name: lc.name, loads: entries(lc.loads, 'fx', 'fy'), settlements: entries(lc.settlements, 'dx', 'dy') })),
+      // the self-weight case is written as generated, without loads: they are computed again from the members when read
+      loadCases: model.loadCases.map((lc, i) => (isGeneratedCase(lc)
+        ? { id: i + 1, name: lc.name, generated: SELF_WEIGHT, loads: [], settlements: [] }
+        : { id: i + 1, name: lc.name, loads: entries(lc.loads, 'fx', 'fy'), settlements: entries(lc.settlements, 'dx', 'dy') })),
       activeLoadCase: model.loadCases.indexOf(model.activeCase) + 1,
     };
   }
@@ -281,7 +353,7 @@
     if (!Array.isArray(obj.nodes) || !Array.isArray(obj.members)) throw new Error('missing "nodes" or "members" arrays');
     const fromVersion = Number(obj.version) === 2 ? 2 : 1;
     const notes = [];
-    const model = readStructure(obj);
+    const model = readStructure(obj, notes);
     if (fromVersion === 2) readLoadCasesV2(obj, model, notes); else migrateV1(obj, model, notes);
     return { model, fromVersion, notes };
   }
@@ -300,12 +372,12 @@
   }
 
   /** Materials, sections, nodes (geometry and support restraints), members and title: the same in both versions. */
-  function readStructure(obj) {
+  function readStructure(obj, notes) {
     const matsIn = Array.isArray(obj.materials) && obj.materials.length ? obj.materials : [{ preset: 'steel' }];
-    const materials = matsIn.map((m) => {
+    const materials = matsIn.map((m, i) => {
       const key = MATERIAL_PRESETS[m.preset] ? m.preset : 'custom', p = MATERIAL_PRESETS[key];
-      const E = fin(m.E, p.E), fy = fin(m.fy, p.fy);
-      return makeMaterial(key, { name: String(m.name || p.name).slice(0, 80), E: E > 0 ? E : p.E, fy: fy > 0 ? fy : p.fy, color: /^#[0-9a-f]{6}$/i.test(m.color) ? m.color : p.color });
+      const E = fin(m.E, p.E), fy = fin(m.fy, p.fy), name = String(m.name || p.name).slice(0, 80);
+      return makeMaterial(key, { name, E: E > 0 ? E : p.E, fy: fy > 0 ? fy : p.fy, density: readDensity(m.density, i, name, notes), color: /^#[0-9a-f]{6}$/i.test(m.color) ? m.color : p.color });
     });
     const secIn = Array.isArray(obj.sections) ? obj.sections : Array.isArray(obj.groups) ? obj.groups : [];
     const groups = secIn.map((g, i) => {
@@ -338,6 +410,19 @@
     });
     const lc = makeLoadCase('Load case 1');
     return { title: String(obj.title || 'Imported truss').slice(0, 120), nodes, members, materials, groups, loadCases: [lc], activeCase: lc };
+  }
+
+  /**
+   * A material's density from a file. Missing or null means not set: files written before milestone 4 have none,
+   * and the preset is not used to fill it in, because the material may have been changed since. A number of
+   * kg/m³, 0 or more (or a string holding one), is kept; anything else is not set either, and a note says so.
+   */
+  function readDensity(v, i, name, notes) {
+    if (v === undefined || v === null) return null;
+    const d = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? +v : NaN;
+    if (validDensity(d)) return d;
+    notes.push({ msg: `Material ${i + 1} ("${name}"): the density ${JSON.stringify(v).slice(0, 40)} is not a number of kg/m³ (0 or more), so it is not set, and its members carry no self-weight until one is entered.` });
+    return null;
   }
 
   /**
@@ -381,6 +466,16 @@
     model.loadCases = list.map((c, k) => {
       const name = typeof c.name === 'string' && c.name.trim() ? c.name.trim().slice(0, 80) : `Load case ${k + 1}`;
       const lc = makeLoadCase(name);
+      if (c.generated === SELF_WEIGHT) {
+        // generated: the loads are computed from the members, so anything stored with the case is not used
+        lc.generated = SELF_WEIGHT;
+        const stored = [c.loads, c.settlements].some((x) => x !== undefined && !(Array.isArray(x) && x.length === 0));
+        if (stored) notes.push({ msg: `"${name}" is the generated self-weight case: its loads are computed from the members, so the loads or settlements stored with it were not applied.` });
+        return lc;
+      }
+      if (c.generated !== undefined && c.generated !== null) {
+        notes.push({ msg: `"${name}" says it is generated (${JSON.stringify(c.generated).slice(0, 40)}), which this version of TrussLab cannot generate, so it was read as an ordinary load case.` });
+      }
       readEntries(c.loads, 'fx', 'fy', lc.loads, model, notes, `"${name}", loads`);
       readEntries(c.settlements, 'dx', 'dy', lc.settlements, model, notes, `"${name}", settlements`);
       return lc;
@@ -410,8 +505,9 @@
 
   /**
    * Model checks that the solver does not make. Returns warnings { msg, ref } for: a custom support with no
-   * fixed axis (it provides no restraint), a settlement on an axis that is not fixed, and a settlement on a
-   * node that no member connects (both have no effect).
+   * fixed axis (it provides no restraint), a settlement on an axis that is not fixed, a settlement on a
+   * node that no member connects (both have no effect), and, when there is a self-weight case, a material
+   * without density used by members (they carry no weight).
    */
   function validateModel(model) {
     const warnings = [];
@@ -434,6 +530,15 @@
         if (free.length) warnings.push({ msg: `Node ${i + 1}: the settlement along ${free.join(' and ')} in "${lc.name}" has no effect, because ${free.join(' and ')} ${free.length > 1 ? 'are' : 'is'} not fixed.`, ref });
       });
     });
+    const sw = selfWeightCase(model);
+    if (sw) {
+      const without = new Map();
+      model.members.forEach((e) => { const mat = e.group.material; if (!validDensity(mat.density)) without.set(mat, (without.get(mat) || 0) + 1); });
+      model.materials.forEach((mat) => {
+        const k = without.get(mat);
+        if (k) warnings.push({ msg: `Material "${mat.name}" has no density, so ${k > 1 ? `its ${k} members carry` : 'its member carries'} no weight in "${sw.name}".` });
+      });
+    }
     return warnings;
   }
 
@@ -586,12 +691,13 @@
     const o = opts || {};
     const lf = o.loadFactor === undefined ? 1 : o.loadFactor;
     const lc = o.loadCase || model.activeCase;
+    const loads = caseLoads(model, lc); // for the self-weight case, computed now from the members
     const idx = new Map(model.nodes.map((n, i) => [n, i]));
     const options = {};
     if (o.targetSF !== undefined) options.targetSF = o.targetSF;
     return {
       nodes: model.nodes.map((n) => {
-        const L = lc.loads.get(n) || ZERO_LOAD, S = lc.settlements.get(n) || ZERO_SETTLEMENT, r = supportRestraint(n.support);
+        const L = loads.get(n) || ZERO_LOAD, S = lc.settlements.get(n) || ZERO_SETTLEMENT, r = supportRestraint(n.support);
         return { x: n.x, y: n.y, fx: L.fx * lf, fy: L.fy * lf, fixX: r.fixX, fixY: r.fixY, angle: r.angle, dx: r.fixX ? S.dx * lf : 0, dy: r.fixY ? S.dy * lf : 0 };
       }),
       members: model.members.map((e) => ({ i: idx.get(e.n1), j: idx.get(e.n2), E: e.group.material.E, A: e.group.A, I: e.group.I, fy: e.group.material.fy })),
@@ -749,7 +855,9 @@
     SUPPORT_TYPES, SUPPORT_SHORT, setSupport, supportRestraint,
     // load cases: nodal loads and prescribed settlements
     makeLoadCase, addLoadCase, removeLoadCase, setActiveLoadCase, removeNodeActions,
-    nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement,
+    nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement, caseLoads,
+    // self-weight: material density and the generated dead-load case
+    GRAVITY, SELF_WEIGHT, validDensity, isGeneratedCase, memberSelfWeight, selfWeightLoads, selfWeightCase, addSelfWeightCase,
     // file format version 2 (reads version 1 too) and model checks
     FORMAT_VERSION, serialize, readModel, deserialize, validateModel,
     // example structures

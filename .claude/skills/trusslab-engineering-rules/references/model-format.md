@@ -8,18 +8,19 @@ The code lives in `model.js` (global `TrussModel`): `serialize`, `readModel` (an
 
 ```
 model    = { title, nodes: [node], members: [member], materials: [material], groups: [group], loadCases: [loadCase], activeCase }
-material = { uid, preset: 'steel' | 'aluminum' | 'fir' | 'custom', name, E, fy, color }
+material = { uid, preset: 'steel' | 'aluminum' | 'fir' | 'custom', name, E, fy, density, color }   // density: kg/m³, or null (not set)
 group    = { uid, name, material, shape: { type, ...dims }, color, A, I }        // a "section" in files
 node     = { uid, x, y, support: { type, angle, fixX, fixY } }
 member   = { uid, n1, n2, group }
-loadCase = { uid, name, loads: Map(node → { fx, fy }), settlements: Map(node → { dx, dy }) }
+loadCase = { uid, name, generated: null | 'self-weight', loads: Map(node → { fx, fy }), settlements: Map(node → { dx, dy }) }
 ```
 
 - Objects refer to each other by reference (`group.material`, `member.n1`, `member.group`, the Map keys, `model.activeCase`), not by id. A `uid` exists only for the current session and is never saved.
 - Array order defines the numbering (N1, M1, load case 1, …) and the solver indices.
 - Units are SI base units: m, N, Pa, m², m⁴, with angles in degrees. `fy` is the yield or limit stress.
 - A model always has at least one load case, and `activeCase` is one of them. `emptyModel()` and every reader create "Load case 1".
-- Material presets: steel E 200 GPa, σy 250 MPa; 6061-T6 aluminium 68.9 GPa, 276 MPa; Douglas fir 11 GPa, 49.9 MPa; custom 100 GPa, 200 MPa. Douglas fir's 49.9 MPa is the clear-wood compressive strength parallel to the grain at 12 % moisture content (USDA Wood Handbook), not a graded design value.
+- Material presets: steel E 200 GPa, σy 250 MPa, ρ 7850 kg/m³; 6061-T6 aluminium 68.9 GPa, 276 MPa, 2700 kg/m³; Douglas fir 11 GPa, 49.9 MPa, 540 kg/m³; custom 100 GPa, 200 MPa, no density. Douglas fir's 49.9 MPa is the clear-wood compressive strength parallel to the grain at 12 % moisture content (USDA Wood Handbook), not a graded design value; its 540 kg/m³ is the specific gravity 0.48 at 12 % moisture content from the same source × 1.12 for the water × 1000 kg/m³ ≈ 538, rounded.
+- **Density** (`density`, kg/m³) is used only for self-weight. `validDensity(v)`: a finite number, 0 or more; anything else, and `null`, means not set, and a member of that material then has no self-weight. A custom material starts without a density: an invented value would give a wrong self-weight with no warning. 0 is a deliberate value (a weightless material), not a missing one.
 - Section shapes (`sectionProps`): `custom` (A and I entered directly), `rod {d}`, `chs {D, t}` (2t ≤ D), `rect {b, h}`, `rhs {b, h, t}` (2t < min(b, h)). Dimensions are in metres. A and the minimum (weak-axis) I are computed from the dimensions, assuming sharp corners.
 
 ## 2. Supports
@@ -46,6 +47,7 @@ A support holds only its restraint: which axes of its nodal frame are fixed, and
 - A settlement on an axis that is not fixed is stored, but has no effect: `toAnalysisInput` passes a settlement only on a fixed axis, and `validateModel` warns.
 - `addLoadCase` (named "Load case N", not activated), `removeLoadCase` (never the last; when the active case goes, a neighbour becomes active), `setActiveLoadCase`, `removeNodeActions` (deleting nodes deletes their loads and settlements in every case), `modelHasSettlement`.
 - `toAnalysisInput(model, { loadFactor: λ, loadCase, targetSF })` analyses one case (default: the active one) and multiplies all its actions by λ: `fx·λ`, `fy·λ`, `dx·λ`, `dy·λ`. See `analysis-math.md` §4.
+- **The self-weight case** (milestone 4) is a load case with `generated: 'self-weight'`, added by `addSelfWeightCase(model)` (at most one per model; not activated; the page activates it). Its loads are never stored: `caseLoads(model, lc)` returns `selfWeightLoads(model)` for it, computed now from the current geometry, sections and materials, so they cannot go stale or add up. `nodeLoad` and `toAnalysisInput` read through `caseLoads`. `setNodeLoad` and `setNodeSettlement` return `false` and change nothing in it, so manual actions never mix with generated ones; in every other case they return `true`. See `analysis-math.md` §6 for W = ρ·A·L·g and the lumping.
 - In `script.js`, undo snapshots are `JSON.stringify({ model: serialize(model), caseUids })`: the uids let an undo keep the load case on screen active when it still exists. Switching the active case is not an edit and is not undone.
 
 ## 4. File format version 2 (`serialize`)
@@ -55,19 +57,21 @@ A support holds only its restraint: which axes of its nodal frame are fixed, and
   "format": "trusslab-model", "version": 2,
   "units": { "length": "m", "force": "N", "stress": "Pa", "area": "m^2", "inertia": "m^4", "angle": "deg" },
   "title": "…",
-  "materials": [{ "id": 1, "name": "…", "preset": "steel", "E": 2e11, "fy": 2.5e8, "color": "#94a3b8" }],
+  "materials": [{ "id": 1, "name": "…", "preset": "steel", "E": 2e11, "fy": 2.5e8, "density": 7850, "color": "#94a3b8" }],
   "sections":  [{ "id": 1, "name": "…", "material": 1, "A": 1e-3, "I": 1e-6, "shape": { "type": "custom" }, "color": "#38bdf8" }],
   "nodes":     [{ "id": 1, "x": 0, "y": 0, "support": { "type": "pin", "angle": 0, "fixX": true, "fixY": true } }],
   "members":   [{ "id": 1, "n1": 1, "n2": 3, "section": 1 }],
   "loadCases": [{ "id": 1, "name": "Load case 1",
                   "loads":       [{ "node": 3, "fx": 0, "fy": -100000 }],
-                  "settlements": [{ "node": 2, "dx": 0, "dy": -0.01 }] }],
+                  "settlements": [{ "node": 2, "dx": 0, "dy": -0.01 }] },
+                { "id": 2, "name": "Self-weight", "generated": "self-weight", "loads": [], "settlements": [] }],
   "activeLoadCase": 1
 }
 ```
 
 - Ids are 1-based. `section.material`, `member.n1`/`n2`, `member.section`, the entries' `node` and `activeLoadCase` refer to those ids.
 - Load and settlement lists are sparse (non-zero entries only), in node order. Every support is written with all four fields, so a custom support with no fixed axis round-trips exactly.
+- Milestone 4 added two optional fields to version 2 (see §8): a material's `density` (kg/m³, or `null` when not set), and `"generated": "self-weight"` on the self-weight case, which is written without loads or settlements because they are computed again from the members when the file is read. An ordinary case has no `generated` field.
 - Exporting version 1 is discontinued. Model files, calculation reports (`{ meta, model, … }`; `meta` also names the analysed load case) and saved sessions all contain version 2.
 
 ## 5. What `readModel` accepts
@@ -95,6 +99,11 @@ The page shows a one-time notice when a version 1 model, report or session with 
 - a missing or empty `loadCases` gives an empty "Load case 1", with a note; an `activeLoadCase` that names no case makes the first case active, with a note;
 - unknown fields are ignored, for forward compatibility. Names are trimmed and cut to 80 characters; an empty name becomes "Load case N".
 
+**Densities and the self-weight case** (milestone 4):
+- A missing or `null` density means not set, without a note: files written before milestone 4 have none, and the preset is not used to fill it in, because the material may have been changed since it was created. Every version 1 file therefore reads without densities.
+- A density that is a number, or a string holding one, of 0 or more is kept; anything else (negative, not finite, text, `true`, an object) is not set, with a note.
+- A case with `"generated": "self-weight"` is read as the generated case; loads or settlements stored with it are not applied (they would be stale), with a note. A case with any other `generated` value is read as an ordinary case with its entries, with a note that this version cannot generate it.
+
 **Normalisation** in both versions (`readStructure`):
 - An unknown material preset becomes `custom`. Invalid E or fy falls back to the preset value. Names are cut to 80 characters and the title to 120. Colours must be `#rrggbb`.
 - An unknown shape becomes `custom`. For other shapes, A and I are recomputed from the dimensions. A non-positive A or I becomes 1000 mm² or 1×10⁶ mm⁴.
@@ -109,6 +118,7 @@ Checks the solver does not make, returned as `{ msg, ref }` and shown in the hea
 - "Node N: the custom support has neither x′ nor y′ fixed, so it provides no restraint."
 - "Node N: the settlement along y′ in "Load case 1" has no effect, because y′ is not fixed." (x′, y′, or both)
 - "Node N is not connected to any member, so its settlement in "…" has no effect."
+- Only when the model has a self-weight case: "Material "…" has no density, so its N members carry no weight in "Self-weight"." (one per material, in material order)
 
 ## 7. Saved sessions in browser storage
 
@@ -128,6 +138,8 @@ Smoke mode uses `SMOKE_SESSION_KEYS` (`trusslab.smoke-test.session.v2`, `.v1`, `
 - **Import notes** are session data, not model data: they are saved beside the model as `importNotes` and read back with the session (`cleanNotes` drops duplicates, malformed entries and links to nodes the model does not have; at most 200). A session without `importNotes` loads as before. The page replaces them whenever a new model is loaded (Open…, an example, New), and an undo snapshot carries them, so undoing an Open… brings back the earlier model's notes.
 
 ## 8. Rules for a future version 3
+
+Milestone 4 extended version 2 without a version bump, on purpose: `density` and `generated` are optional, a file without them reads exactly as before, and a version 2 reader that does not know them (milestone 3) loses only those additions, never structural data or entered loads: it reads the self-weight case as an empty ordinary case and the materials without density. Bumping the version would have made every new file unreadable for that reader and required a new session key. Add further fields the same way only when the same holds; otherwise bump the version as below.
 
 - Keep reading versions 1 and 2, and all three wrappers, with a migration test for each.
 - Never delete the only recoverable copy of a user's session: write and verify the new key before removing an old one.

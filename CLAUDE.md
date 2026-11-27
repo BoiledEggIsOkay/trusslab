@@ -36,7 +36,7 @@ Keep `fea-core.js` one self-contained file. Change its mathematical formulation 
 | Global | Defined in | Notes |
 |---|---|---|
 | `FEA` | `fea-core.js` | Numerical engine; also `module.exports` under Node |
-| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects and load cases, file format version 2 (`readModel` also reads version 1 files, reports and sessions), `validateModel`, examples, `toAnalysisInput`, saved-session storage with injected `Storage` (`loadStoredSession`, `saveStoredSession`); also `module.exports` under Node |
+| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects and load cases, material densities and the generated self-weight case (`memberSelfWeight`, `selfWeightLoads`, `caseLoads`), file format version 2 (`readModel` also reads version 1 files, reports and sessions), `validateModel`, examples, `toAnalysisInput`, saved-session storage with injected `Storage` (`loadStoredSession`, `saveStoredSession`); also `module.exports` under Node |
 | `TrussLab` | `script.js` (end) | Older test hook that exposes live internal state. Keep it unchanged for compatibility; new code and tests must not depend on it |
 | `TrussLabTest` | `script.js` section 17 | Testing adapter, version 2, installed only in smoke mode (`?smoke`) |
 
@@ -46,7 +46,7 @@ Saved sessions live in `localStorage` under `trusslab.session.v2`; `trusslab.ses
 
 ## Tests
 
-- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (393 checks, including the nine examples at λ = 1 against the regression baseline in `test/fixtures/examples-baseline.js`).
+- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (544 checks, including the nine examples at λ = 1 against the regression baseline in `test/fixtures/examples-baseline.js`).
 - Browser smoke test (`test/browser-smoke.js`), in two modes:
   - `index.html?smoke` runs every scenario against the real page and must end with PASS.
   - `index.html?smoke=selftest` adds one deliberately failing scenario. It ends with PASS only if exactly that scenario fails and every clean-up check still passes, which shows that a failing test cannot damage the user's work.
@@ -62,8 +62,9 @@ Done:
 - `4712cba` Rev 4, milestone 2: DOM-free model layer. `model.js` (global `TrussModel`) with `toAnalysisInput`, `test/model.test.js` (206 checks) and the example baseline `test/fixtures/examples-baseline.js`. No behaviour change; file format version 1 unchanged.
 - Milestone 3: load cases. Loads and settlements belong to load cases; supports keep only their restraint (type, angle, fixed axes). λ scales loads and settlements. File format version 2, reading version 1 model files, report files and autosaved sessions (with migration tests for each); verified session migration, backups of unreadable sessions, no writes after a failed read, import notes kept with the session, "Changes not saved — browser storage unavailable" status notes; model warnings (`validateModel`); `TrussLabTest` version 2.
 
+- Milestone 4: material density and the generated self-weight load case. Materials carry a density ρ in kg/m³ (presets: steel 7850, aluminium 2700, Douglas fir 540; none for a custom material or for materials read from older files). **+ Self-weight case** adds one generated dead-load case: W = ρ·A·L·g (g = 9.80665 m/s²) per member, W/2 downward at each end node, computed from the current model whenever it is read, never stored, so it cannot go stale or accumulate; manual loads and settlements are refused in it. Saved as additive optional fields of file format version 2 (`density`, `"generated": "self-weight"`). Warnings for materials without density.
+
 Next, strictly one at a time, each approved before the next begins:
-4. Material density and a generated self-weight load case.
 5. Load combinations solved directly, with worst-case results.
 6. UI/UX redesign, before any educational interface (follow `trusslab-ui-design`):
    - audit the complete existing UI and identify the sources of unnecessary complexity;

@@ -35,6 +35,7 @@
     SUPPORT_TYPES, SUPPORT_SHORT, setSupport, supportRestraint, serialize, readModel, deserialize, validateModel,
     EXAMPLES, buildExample, toAnalysisInput,
     addLoadCase, removeLoadCase, setActiveLoadCase, removeNodeActions, nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement,
+    GRAVITY, validDensity, isGeneratedCase, memberSelfWeight, selfWeightCase, addSelfWeightCase,
     SESSION_KEYS, SMOKE_SESSION_KEYS, loadStoredSession, saveStoredSession,
   } = TrussModel;
 
@@ -825,7 +826,7 @@
     const r = info.r;
     const lines = [];
     if (info.mode === 'deformed') lines.push(`<b>Deflection ×${fmt(state.s.scale, 4)}</b> · dashed = undeformed`);
-    if (state.model.loadCases.length > 1) lines.push(`Load case: <b>${esc(state.model.activeCase.name)}</b>`);
+    if (state.model.loadCases.length > 1) lines.push(`Load case: <b>${esc(state.model.activeCase.name)}</b>${isGeneratedCase(state.model.activeCase) ? ' (generated)' : ''}`);
     if (state.s.loadFactor !== 1) lines.push(`<b>Load factor λ = ${fmt(state.s.loadFactor, 4)}</b>`);
     if (r && r.ok) lines.push(`δmax ${fD(r.summary.maxDisp.value)} ${state.s.dispUnit} · SFmin ${fmt(r.summary.minSF.value, 3)}`);
     const html = lines.join('<br>');
@@ -1020,9 +1021,16 @@
     selectOnly('node', n);
     modelChanged();
   }
+  /** True, after a message, when the active case is the generated self-weight case: no loads or settlements go into it. */
+  function refuseGenerated() {
+    const lc = state.model.activeCase;
+    if (!isGeneratedCase(lc)) return false;
+    toast(`“${lc.name}” is generated from the members’ weight, so loads and settlements cannot be entered in it. Choose another load case`, 'warn');
+    return true;
+  }
   function downLoad(sx, sy) {
     const n = pickNode(sx, sy, 10);
-    if (!n) return;
+    if (!n || refuseGenerated()) return;
     pushUndo();
     const t = state.loadTool, cur = nodeLoad(state.model, n); // the active load case
     if (t.mode === 'clear') setNodeLoad(state.model, n, 0, 0);
@@ -1300,10 +1308,14 @@
   /** Load-case controls (Analysis section): the active case, its name, and adding or deleting cases. */
   function renderLoadCases() {
     const m = state.model, sel = $('#selLoadCase'), name = $('#txtCaseName');
-    sel.innerHTML = m.loadCases.map((c, i) => `<option value="${i}">${esc(c.name)}</option>`).join('');
+    sel.innerHTML = m.loadCases.map((c, i) => `<option value="${i}">${esc(c.name)}${isGeneratedCase(c) ? ' (generated)' : ''}</option>`).join('');
     sel.value = String(m.loadCases.indexOf(m.activeCase));
     if (document.activeElement !== name) name.value = m.activeCase.name;
     $('#btnDeleteCase').disabled = m.loadCases.length <= 1;
+    const sw = $('#btnAddSelfWeight'), has = !!selfWeightCase(m);
+    sw.disabled = has;
+    sw.title = has ? 'This model already has its self-weight case' : 'Add the generated self-weight case: each member’s weight W = ρ·A·L·g, half at each end node';
+    $('#selfWeightNote').hidden = !isGeneratedCase(m.activeCase);
   }
   function bindLoadCases() {
     $('#selLoadCase').addEventListener('change', (e) => {
@@ -1319,6 +1331,14 @@
       renderLoadCases();
       modelChanged();
       toast(`Added “${state.model.activeCase.name}”. Loads and settlements you apply now go into it`, 'ok');
+    });
+    $('#btnAddSelfWeight').addEventListener('click', () => {
+      if (selfWeightCase(state.model)) return;
+      pushUndo();
+      setActiveLoadCase(state.model, addSelfWeightCase(state.model));
+      renderLoadCases();
+      modelChanged();
+      toast(`Added “${state.model.activeCase.name}”, generated from the members: W = ρ·A·L·g each, half at each end node`, 'ok');
     });
     const name = $('#txtCaseName');
     name.addEventListener('change', () => {
@@ -1355,6 +1375,7 @@
         <div class="mat-props">
           <label>E <input class="num" data-mf="E" value="${inVal(m.E / GPA)}" title="Young's modulus, GPa"><span class="u">GPa</span></label>
           <label>σ<sub>y</sub> <input class="num" data-mf="fy" value="${inVal(m.fy / MPA)}" title="Yield / limit stress, MPa"><span class="u">MPa</span></label>
+          <label>ρ <input class="num" data-mf="density" value="${validDensity(m.density) ? inVal(m.density) : ''}" placeholder="not set" title="Density for self-weight, kg/m³ (steel 7850, aluminium 2700, Douglas fir about 540). Empty means not set: members of this material then carry no self-weight."><span class="u">kg/m³</span></label>
         </div>
         ${m.preset === 'fir' ? `<div class="mat-note">${esc(FIR_NOTE)}</div>` : ''}
       </div>`).join('');
@@ -1375,6 +1396,17 @@
         el.addEventListener('change', () => {
           if (f === 'name') { pushUndo(); m.name = el.value.trim().slice(0, 80) || 'Material'; modelChanged({ materials: true, groups: true }); return; }
           if (f === 'color') { m.color = el.value; scheduleSave(); return; }
+          if (f === 'density') { // kg/m³; empty means not set (no self-weight), never an invented value
+            const t = el.value.trim(), d = t === '' ? null : evalNum(t);
+            if (d !== null && !validDensity(d)) { el.classList.add('invalid'); toast('Density must be a number of kg/m³, 0 or more, or empty for not set', 'bad'); return; }
+            el.classList.remove('invalid');
+            el.value = d === null ? '' : inVal(d);
+            if (d === (validDensity(m.density) ? m.density : null)) return;
+            pushUndo();
+            m.density = d;
+            modelChanged({ groups: true });
+            return;
+          }
           const v = evalNum(el.value);
           if (!(v > 0)) { el.classList.add('invalid'); toast(`${f === 'E' ? 'E' : 'σy'} must be a positive number`, 'bad'); return; }
           el.classList.remove('invalid');
@@ -1605,6 +1637,15 @@
     const settle = axes.length ? `<div class="sub-h">Settlement in “${caseName}” (before λ)</div><div class="form-grid">${axes.map(([f, ax, fixed, v]) =>
       `<label>δ along ${ax}</label><div class="inline">${numIn(f, v / dU(), fixed ? 'title="Prescribed displacement along this support axis"' : 'title="This axis is not fixed, so this settlement has no effect"')}<span class="u">${du}</span></div>`).join('')}</div>` : '';
     const warn = nodeWarnings(n).map((w) => `<p class="note warn-note">${esc(w.msg)}</p>`).join('');
+    const gen = isGeneratedCase(state.model.activeCase);
+    const loadPart = gen ? selfWeightNodeText(n, L, caseName) : `
+      <div class="sub-h">Nodal load in “${caseName}” (before λ)</div>
+      <div class="form-grid">
+        <label>F<sub>x</sub></label><div class="inline">${numIn('fx', L.fx / fU())}<span class="u">${fu}</span></div>
+        <label>F<sub>y</sub></label><div class="inline">${numIn('fy', L.fy / fU())}<span class="u">${fu}</span></div>
+        <label>|F|</label><div class="inline">${numIn('fmag', F / fU())}<span class="u">${fu}</span></div>
+        <label>Direction</label><div class="inline">${numIn('fang', ang, 'title="Degrees CCW from +x (−90 = downward)"')}<span class="u">°</span></div>
+      </div>`;
     return `
       <div class="ins-title"><h4>Node N${nodeNo(n)}<small>${esc(nodeSupportText(n))}</small></h4><button class="btn sm danger" data-act="del">Delete</button></div>
       <div class="sub-h">Coordinates</div>
@@ -1613,15 +1654,17 @@
         <label>Y</label><div class="inline">${numIn('y', n.y, 'title="Expressions allowed, e.g. 2.5*sqrt(3)"')}<span class="u">m</span></div>
       </div>
       <div class="sub-h">Support / boundary condition</div>
-      <div class="form-grid">${sup}</div>${warn}${settle}
-      <div class="sub-h">Nodal load in “${caseName}” (before λ)</div>
-      <div class="form-grid">
-        <label>F<sub>x</sub></label><div class="inline">${numIn('fx', L.fx / fU())}<span class="u">${fu}</span></div>
-        <label>F<sub>y</sub></label><div class="inline">${numIn('fy', L.fy / fU())}<span class="u">${fu}</span></div>
-        <label>|F|</label><div class="inline">${numIn('fmag', F / fU())}<span class="u">${fu}</span></div>
-        <label>Direction</label><div class="inline">${numIn('fang', ang, 'title="Degrees CCW from +x (−90 = downward)"')}<span class="u">°</span></div>
-      </div>
+      <div class="form-grid">${sup}</div>${warn}${gen ? '' : settle}${loadPart}
       <div class="sub-h">Results</div><div id="insResults"></div>`;
+  }
+  /** The node's load in the generated self-weight case, read-only, with where it comes from. */
+  function selfWeightNodeText(n, L, caseName) {
+    const fu = state.s.forceUnit;
+    const parts = state.model.members.filter((e) => e.n1 === n || e.n2 === n)
+      .map((e) => { const w = memberSelfWeight(e); return w.density === null ? `M${memberNo(e)} none (no density)` : `M${memberNo(e)} ${fF(w.W / 2)}`; });
+    return `<div class="sub-h">Self-weight load in “${caseName}” (generated, before λ)</div>
+      <div class="form-grid"><label>F<sub>y</sub></label><div class="inline"><span>${fF(L.fy)}</span><span class="u">${fu}</span></div></div>
+      <p class="note">${parts.length ? `Half the weight of each member at this node, acting downward: ${parts.join(', ')} ${fu}.` : 'No member is connected to this node, so it carries no self-weight.'} Recalculated whenever the geometry, a section or a material changes. Loads cannot be entered in this case.</p>`;
   }
   function memberForm(e) {
     return `
@@ -1631,8 +1674,16 @@
         <label>Start node</label><div class="inline"><input class="num" data-f="n1" value="${nodeNo(e.n1)}"></div>
         <label>End node</label><div class="inline"><input class="num" data-f="n2" value="${nodeNo(e.n2)}"></div>
         <label>Section</label><select class="select" data-f="grp">${state.model.groups.map((g, i) => `<option value="${i}" ${g === e.group ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
-      </div>
+      </div>${selfWeightCase(state.model) ? memberSelfWeightText(e) : ''}
       <div id="insResults"></div>`;
+  }
+  /** A member's weight with the numbers it comes from (shown when the model has a self-weight case). */
+  function memberSelfWeightText(e) {
+    const w = memberSelfWeight(e), fu = state.s.forceUnit, mat = e.group.material;
+    if (w.density === null) return `<div class="sub-h">Self-weight</div><p class="note warn-note">“${esc(mat.name)}” has no density, so this member carries no self-weight. Enter its density ρ under Materials.</p>`;
+    return `<div class="sub-h">Self-weight</div>
+      <p class="note">W = ρ·A·L·g = ${fmt(w.density)} kg/m³ × ${fmt(w.A / MM2)} mm² × ${fmt(w.L)} m × ${GRAVITY} m/s² = ${fF(w.W)} ${fu}.
+      Half of it, ${fF(w.W / 2)} ${fu}, acts downward at each end node (N${nodeNo(e.n1)} and N${nodeNo(e.n2)}): for a pin-ended member these are the end reactions of its own uniform weight, so the truss carries it as nodal loads (the member's own bending is not modelled).</p>`;
   }
   function multiForm(ns, ms) {
     const fu = state.s.forceUnit;
@@ -1642,9 +1693,9 @@
         <div class="form-grid">
           <label>Support</label><div class="inline"><select class="select" data-m="stype">${SUPPORT_TYPES.filter(([k]) => k !== 'custom').map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
           <label>Angle α</label><div class="inline"><input class="num" data-m="sangle" value="30"><span class="u">°</span><button class="btn sm" data-act="mm-support">Apply</button></div>
-          <label>Load case</label><div class="inline"><span class="dim">${esc(state.model.activeCase.name)}</span></div>
-          <label>F<sub>x</sub></label><div class="inline"><input class="num" data-m="fx" value="0"><span class="u">${fu}</span></div>
-          <label>F<sub>y</sub></label><div class="inline"><input class="num" data-m="fy" value="${inVal(-10e3 / fU())}"><span class="u">${fu}</span><button class="btn sm" data-act="mm-load">Apply</button></div>
+          <label>Load case</label><div class="inline"><span class="dim">${esc(state.model.activeCase.name)}${isGeneratedCase(state.model.activeCase) ? ' (generated: no loads can be entered)' : ''}</span></div>
+          ${isGeneratedCase(state.model.activeCase) ? '' : `<label>F<sub>x</sub></label><div class="inline"><input class="num" data-m="fx" value="0"><span class="u">${fu}</span></div>
+          <label>F<sub>y</sub></label><div class="inline"><input class="num" data-m="fy" value="${inVal(-10e3 / fU())}"><span class="u">${fu}</span><button class="btn sm" data-act="mm-load">Apply</button></div>`}
         </div>`;
     }
     if (ms.length) {
@@ -1708,6 +1759,7 @@
       if (dup && dup !== e) { el.classList.add('invalid'); toast('Those nodes are already connected', 'warn'); return; }
       pushUndo(); e[f] = nn; modelChanged(); return;
     }
+    if (['fx', 'fy', 'fmag', 'fang', 'sdx', 'sdy'].includes(f) && refuseGenerated()) return;
     pushUndo();
     switch (f) {
       case 'x': n.x = v; break;
@@ -1747,6 +1799,7 @@
       pushUndo(); ns.forEach((n) => setSupport(n, q('stype').value, ang));
       toast(`Support applied to ${plural(ns.length, 'node')}`, 'ok'); modelChanged();
     } else if (act === 'mm-load') {
+      if (refuseGenerated()) return;
       const fx = readNum(q('fx')), fy = readNum(q('fy')); if (fx === null || fy === null) return;
       pushUndo(); ns.forEach((n) => setNodeLoad(state.model, n, fx * fU(), fy * fU()));
       toast(`Load applied to ${plural(ns.length, 'node')}`, 'ok'); modelChanged();
@@ -1910,6 +1963,12 @@
       <div class="lg-keys"><span><i style="background:#ef4444"></i>Compression</span><span><i style="background:#3b82f6"></i>Tension</span><span><i style="background:#6b7280"></i>Zero</span></div>`;
     lg.hidden = false;
   }
+  /** The health report's explanation of the generated self-weight case: where its loads come from and when they change. */
+  function selfWeightBlock() {
+    let total = 0, counted = 0;
+    state.model.members.forEach((e) => { const w = memberSelfWeight(e); if (w.density !== null) { total += w.W; counted++; } });
+    return `<div class="sub-h">Self-weight (generated)</div><p class="note">Each member weighs W = ρ·A·L·g: its material's density, its section area, its length, and g = ${GRAVITY} m/s². Half of W acts downward at each end node. Total ${fF(total)} ${state.s.forceUnit} from ${plural(counted, 'member')}, before λ. Recalculated whenever the geometry, a section or a material changes.</p>`;
+  }
   function renderHealth() {
     const box = $('#health');
     const r = state.res, fu = state.s.forceUnit, du = state.s.dispUnit;
@@ -1954,6 +2013,7 @@
       <dt>Members</dt><dd>${c.tension} T · ${c.compression} C · ${c.zero} zero</dd>
       <dt>Status</dt><dd>${c.safe} safe · <span class="${c.yielded ? 'check-bad' : ''}">${c.yielded} yielded</span> · <span class="${c.buckled ? 'check-bad' : ''}">${c.buckled} buckled</span></dd>
     </dl>`;
+    if (isGeneratedCase(state.model.activeCase)) h += selfWeightBlock();
     h += `<div class="sub-h">Buckling risk <span style="text-transform:none">(P<sub>cr</sub>/|F| &lt; ${fmt(Math.max(state.s.targetSF, 1), 3)})</span></div>`;
     if (sm.bucklingRisk.length) {
       h += `<ul class="risk-list">${sm.bucklingRisk.slice(0, 12).map((b) => {
@@ -2270,7 +2330,7 @@
     const inp = toAnalysisInput(M, { loadFactor: r.loadFactor });
     const obj = {
       meta: { app: 'TrussLab 2D Truss FEA & Load Simulator', solver: FEA.VERSION, generated: new Date().toISOString(), units: 'SI base units: m, N, Pa, m^2, m^4; angles in degrees',
-        loadCase: { id: M.loadCases.indexOf(M.activeCase) + 1, name: M.activeCase.name }, loadFactor: r.loadFactor, loadFactorScales: 'nodal loads and prescribed settlements', targetSF: state.s.targetSF },
+        loadCase: Object.assign({ id: M.loadCases.indexOf(M.activeCase) + 1, name: M.activeCase.name }, isGeneratedCase(M.activeCase) ? { generated: 'self-weight', selfWeight: 'W = rho*A*L*g per member, W/2 downward at each end node', g: GRAVITY } : {}), loadFactor: r.loadFactor, loadFactorScales: 'nodal loads and prescribed settlements', targetSF: state.s.targetSF },
       model: serialize(M),
       status: r.ok ? 'solved' : r.mechanism ? 'unstable' : 'invalid',
       errors: r.errors.map((e) => e.msg), warnings: validateModel(M).map((w) => w.msg).concat(r.warnings.map((w) => w.msg)),

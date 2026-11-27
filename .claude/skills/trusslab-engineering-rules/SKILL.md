@@ -15,7 +15,7 @@ TrussLab teaches from the operations its solver really performs. Every number sh
 - Change the mathematical formulation only with a stated reason, documentation in the README's "Method" section, and regression tests.
 - Never add safety factors, utilisations or member classifications across load cases or combinations: they are not linear in the loads.
 - The existing horizontal-extent / maximum-total-displacement ratio is not approved as a general structural design acceptance criterion. Do not implement the design deflection check until a physically appropriate measure has been agreed upon and documented.
-- Not modelled: temperature, geometric or material nonlinearity, dynamics, inelastic buckling, connection design, or design-code resistance factors. Self-weight arrives in milestone 4.
+- Not modelled: temperature, geometric or material nonlinearity, dynamics, inelastic buckling, connection design, or design-code resistance factors. Self-weight (milestone 4) is lumped as nodal loads, W/2 at each end node; distributed loads are not modelled.
 
 ## Units and signs
 
@@ -29,7 +29,7 @@ TrussLab teaches from the operations its solver really performs. Every number sh
 | Milestone | Rule, in short | Details |
 |---|---|---|
 | 3 Load cases (done) | Every prescribed action (nodal forces and settlements) belongs to a load case; supports keep only restraint geometry. λ scales loads and settlements alike; λ = 0 gives zero results only for a stable model. File format version 2 reads version 1 files, reports and sessions | `model-format.md` §3–§7, `analysis-math.md` §4 |
-| 4 Self-weight | Generated dead-load case: W = ρAL·g, half to each end node, gravity −y, recomputed after section changes. No distributed loads | `analysis-math.md` §6 |
+| 4 Self-weight (done) | Generated dead-load case: W = ρAL·g, half to each end node, gravity −y, recomputed after any change to geometry, sections or materials (computed on every read, never stored). Densities in kg/m³; none for custom materials or older files. No distributed loads | `analysis-math.md` §6, `model-format.md` §1, §3–§6 |
 | 5 Combinations | Solve each combination's factored state directly; design checks take the worst governing value | `analysis-math.md` §5, `design-conventions.md` §3 |
 | 10 Sizing | Discrete candidates per section group, sorted by ρA; iterate with a cap, cycle detection and an explicit not-converged result | `design-conventions.md` §4 |
 | 10 Deflection | Only after a physically appropriate measure is agreed and documented | `design-conventions.md` §5 |

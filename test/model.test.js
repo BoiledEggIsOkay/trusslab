@@ -58,7 +58,8 @@ testCase('Loading and API', () => {
     'sectionProps', 'makeMaterial', 'makeGroup', 'makeNode', 'makeMember', 'emptyModel', 'SUPPORT_TYPES', 'SUPPORT_SHORT', 'setSupport',
     'supportRestraint', 'makeLoadCase', 'addLoadCase', 'removeLoadCase', 'setActiveLoadCase', 'removeNodeActions', 'nodeLoad', 'setNodeLoad',
     'nodeSettlement', 'setNodeSettlement', 'modelHasSettlement', 'FORMAT_VERSION', 'serialize', 'readModel', 'deserialize', 'validateModel',
-    'EXAMPLES', 'buildExample', 'toAnalysisInput', 'SESSION_KEYS', 'SMOKE_SESSION_KEYS', 'loadStoredSession', 'saveStoredSession', 'backupUnreadable'];
+    'EXAMPLES', 'buildExample', 'toAnalysisInput', 'SESSION_KEYS', 'SMOKE_SESSION_KEYS', 'loadStoredSession', 'saveStoredSession', 'backupUnreadable',
+    'caseLoads', 'GRAVITY', 'SELF_WEIGHT', 'validDensity', 'isGeneratedCase', 'memberSelfWeight', 'selfWeightLoads', 'selfWeightCase', 'addSelfWeightCase'];
   const missing = want.filter((k) => !(k in TM));
   check('TrussModel exports the whole model API', missing.length === 0, `missing ${missing.join(', ')}`);
   check('model.js loaded and works with no DOM present', typeof document === 'undefined' && typeof TM.buildExample('aframe') === 'object');
@@ -786,6 +787,252 @@ testCase('Import notes are kept with the saved session', () => {
   const notList = fakeStorage({ [K.v2]: JSON.stringify({ model: aframe, settings: {}, view: {}, importNotes: 'not a list' }) });
   L = TM.loadStoredSession(notList, K);
   check('notes that are not a list are ignored; the session still loads', L.source === 'v2' && L.notes.length === 0);
+});
+
+/* ---------- milestone 4: material density and the generated self-weight case ---------- */
+// Hand references below use g = 9.80665 m/s² (standard gravity), W = ρ·A·L·g, and W/2 downward at each end node.
+const G = 9.80665;
+// A statically determinate test truss: A (0, 0) pin, B (6, 0) roller (uy = 0), apex C (3, 4); AC and BC are 5 m long, AB 6 m.
+// AC: steel 7850 kg/m³, 2000 mm²: W = 7850 · 0.002 · 5 · g = 78.5 g = 769.822025 N
+// BC: aluminium 2700 kg/m³, 1000 mm²: W = 2700 · 0.001 · 5 · g = 13.5 g = 132.389775 N
+// AB: Douglas fir 540 kg/m³, 10000 mm²: W = 540 · 0.01 · 6 · g = 32.4 g = 317.73546 N
+const W_AC = 769.822025, W_BC = 132.389775, W_AB = 317.73546;
+function swTruss() {
+  const m = TM.emptyModel('Self-weight test');
+  const [steel, alu, fir] = m.materials;
+  const gS = TM.makeGroup('Steel 2000 mm²', steel, { type: 'custom' }, null, 2000 * TM.MM2, 2e6 * TM.MM4);
+  const gA = TM.makeGroup('Aluminium 1000 mm²', alu, { type: 'custom' }, null, 1000 * TM.MM2, 1e6 * TM.MM4);
+  const gF = TM.makeGroup('Fir 10000 mm²', fir, { type: 'custom' }, null, 10000 * TM.MM2, 8e6 * TM.MM4);
+  m.groups = [gS, gA, gF];
+  const A = TM.makeNode(0, 0), B = TM.makeNode(6, 0), C = TM.makeNode(3, 4);
+  TM.setSupport(A, 'pin'); TM.setSupport(B, 'rollerX');
+  m.nodes.push(A, B, C);
+  m.members.push(TM.makeMember(A, C, gS), TM.makeMember(B, C, gA), TM.makeMember(A, B, gF));
+  return { m, A, B, C, gS, gA, gF, steel, alu, fir };
+}
+const fyOf = (m, n, lc) => TM.nodeLoad(m, n, lc).fy;
+// the code adds the half weights at a node one member at a time, so compare with the hand sums to a relative 1e-14
+const nearly = (x, want) => Math.abs(x / want - 1) < 1e-14;
+const loadsJSON = (m, lc) => JSON.stringify(m.nodes.map((n) => TM.nodeLoad(m, n, lc)));
+
+testCase('Material density (kg/m³)', () => {
+  same('preset densities: steel 7850, aluminium 2700, Douglas fir 540; a custom material has none',
+    ['steel', 'aluminum', 'fir', 'custom'].map((k) => TM.MATERIAL_PRESETS[k].density), [7850, 2700, 540, null]);
+  same('makeMaterial takes the preset density; a custom or unknown material starts with no density, not an invented one',
+    [TM.makeMaterial('steel').density, TM.makeMaterial('fir').density, TM.makeMaterial('custom').density, TM.makeMaterial('unobtainium').density], [7850, 540, null, null]);
+  same('a usable density is a finite number, 0 or more', [7850, 0, -1, NaN, Infinity, '7850', null, undefined].map(TM.validDensity), [true, true, false, false, false, false, false, false]);
+  const f = TM.serialize(TM.emptyModel());
+  same('it is written with each material, in kg/m³', f.materials.map((x) => x.density), [7850, 2700, 540]);
+  same('material fields in a file', Object.keys(f.materials[0]), ['id', 'name', 'preset', 'E', 'fy', 'density', 'color']);
+  const withCustom = TM.emptyModel(); withCustom.materials.push(TM.makeMaterial('custom'));
+  check('a material without density is written as null', TM.serialize(withCustom).materials[3].density === null);
+  const read = (density) => { const g = copy(f); g.materials[0].density = density; if (density === undefined) delete g.materials[0].density; return TM.readModel(g); };
+  const r0 = read(undefined);
+  check('a file without densities (version 2 before milestone 4) reads as "not set", even for a steel preset, and without a note',
+    r0.model.materials[0].density === null && r0.notes.length === 0);
+  check('... and so does every version 1 file', TM.readModel(copy(V1_FILE)).model.materials.every((x) => x.density === null));
+  same('a density of 0 is kept (a weightless material), and a number written as text is read', [read(0).model.materials[0].density, read('7850').model.materials[0].density], [0, 7850]);
+  for (const bad of [-1, 'abc', true, {}, '1e999']) {
+    const r = read(bad);
+    check(`an invalid density (${JSON.stringify(bad)}) is not set, and a note says so`, r.model.materials[0].density === null && r.notes.length === 1 && /density .* is not a number of kg\/m³/.test(r.notes[0].msg), JSON.stringify(r.notes));
+  }
+});
+
+testCase('Self-weight of one member: W = ρ·A·L·g, half to each end node (closed form)', () => {
+  check('g is standard gravity, 9.80665 m/s²', TM.GRAVITY === 9.80665 && TM.SELF_WEIGHT === 'self-weight');
+  const m = TM.emptyModel(), steel = m.materials[0], g = m.groups[0]; // steel, A = 2000 mm²
+  const a = TM.makeNode(0, 0), b = TM.makeNode(4, 0);
+  m.nodes.push(a, b); m.members.push(TM.makeMember(a, b, g));
+  const w = TM.memberSelfWeight(m.members[0]);
+  same('the member: ρ 7850 kg/m³, A 2000 mm² = 0.002 m², L 4 m, g 9.80665 m/s²', [w.density, w.A, w.L, w.g], [7850, 2000 * TM.MM2, 4, 9.80665]);
+  near('W = 7850 · 0.002 · 4 · 9.80665 = 615.85762 N', w.W, 615.85762, 1e-14);
+  const sw = TM.addSelfWeightCase(m), L = TM.selfWeightLoads(m);
+  near('end 1 carries W/2 = 307.92881 N downward', L.get(a).fy, -307.92881, 1e-14);
+  check('end 2 carries exactly the same', L.get(b).fy === L.get(a).fy);
+  check('and nothing horizontal: the load is along −y (gravity)', L.get(a).fx === 0 && L.get(b).fx === 0);
+  same('nodeLoad reads the same values in the self-weight case', [TM.nodeLoad(m, a, sw), TM.nodeLoad(m, b, sw)], [L.get(a), L.get(b)]);
+  // a sloped member: 3-4-5 triangle, aluminium 1000 mm²: W = 2700 · 0.001 · 5 · g = 132.389775 N, still purely vertical
+  const alu = m.materials[1], gA = TM.makeGroup('a', alu, { type: 'custom' }, null, 1000 * TM.MM2, 1e6 * TM.MM4);
+  const c = TM.makeNode(10, 0), d = TM.makeNode(13, 4);
+  m.groups.push(gA); m.nodes.push(c, d); m.members.push(TM.makeMember(c, d, gA));
+  near('a sloped member: L = hypot(3, 4) = 5 m', TM.memberSelfWeight(m.members[1]).L, 5, 1e-15);
+  near('W = 2700 · 0.001 · 5 · 9.80665 = 132.389775 N', TM.memberSelfWeight(m.members[1]).W, 132.389775, 1e-14);
+  check('... and its end loads are still vertical, W/2 each', TM.nodeLoad(m, c, sw).fx === 0 && Math.abs(TM.nodeLoad(m, d, sw).fy / -66.1948875 - 1) < 1e-14 && TM.nodeLoad(m, c, sw).fy === TM.nodeLoad(m, d, sw).fy);
+  // units: kg/m³ · m² · m · m/s² = kg·m/s² = N. One cubic metre of steel: 7850 · 9.80665 = 76982.2025 N (unit weight 76.98 kN/m³)
+  const u = TM.emptyModel(), p = TM.makeNode(0, 0), q = TM.makeNode(0, 1), cube = TM.makeGroup('1 m²', u.materials[0], { type: 'custom' }, null, 1, 1);
+  u.groups = [cube]; u.nodes.push(p, q); u.members.push(TM.makeMember(p, q, cube));
+  near('units: 1 m of a 1 m² steel bar weighs 76982.2025 N, steel\'s unit weight of 76.98 kN/m³', TM.memberSelfWeight(u.members[0]).W, 76982.2025, 1e-14);
+  near('... and a section entered in mm² gives the same weight per m² (2000 mm² = 0.002 m²)', TM.memberSelfWeight(m.members[0]).W / (2000 * TM.MM2 * 4), 76982.2025, 1e-14);
+});
+
+testCase('Self-weight of members with different lengths, areas and densities sharing nodes (closed form)', () => {
+  const { m, A, B, C } = swTruss();
+  const sw = TM.addSelfWeightCase(m);
+  near('member AC (steel, 2000 mm², 5 m): 769.822025 N', TM.memberSelfWeight(m.members[0]).W, W_AC, 1e-14);
+  near('member BC (aluminium, 1000 mm², 5 m): 132.389775 N', TM.memberSelfWeight(m.members[1]).W, W_BC, 1e-14);
+  near('member AB (fir, 10000 mm², 6 m): 317.73546 N', TM.memberSelfWeight(m.members[2]).W, W_AB, 1e-14);
+  near('node A gets half of AC and half of AB: −543.7787425 N', fyOf(m, A, sw), -(W_AC + W_AB) / 2, 1e-14);
+  near('node B gets half of BC and half of AB: −225.0626175 N', fyOf(m, B, sw), -(W_BC + W_AB) / 2, 1e-14);
+  near('node C gets half of AC and half of BC: −451.1059 N', fyOf(m, C, sw), -(W_AC + W_BC) / 2, 1e-14);
+  near('the end loads add up to the total weight, 1219.94726 N', -(fyOf(m, A, sw) + fyOf(m, B, sw) + fyOf(m, C, sw)), W_AC + W_BC + W_AB, 1e-14);
+  // statics: only the apex load P = 451.1059 N loads the members (A and B are supports); sin θ = 4/5, cos θ = 3/5
+  const P = (W_AC + W_BC) / 2, r = analyse(m, { loadFactor: 1, loadCase: sw });
+  check('the self-weight case solves', r.ok);
+  near('AC carries −P / (2 sin θ) = −281.9411875 N (compression)', r.members[0].force, -P / 1.6, 1e-12);
+  near('BC carries the same', r.members[1].force, -P / 1.6, 1e-12);
+  near('the tie AB carries P / (2 tan θ) = 169.1647125 N (tension)', r.members[2].force, P * 3 / 8, 1e-12);
+  near('reaction at A: 543.7787425 + P/2 = 769.3316925 N', r.nodes[0].ry, (W_AC + W_AB) / 2 + P / 2, 1e-12);
+  near('reaction at B: 225.0626175 + P/2 = 450.6155675 N', r.nodes[1].ry, (W_BC + W_AB) / 2 + P / 2, 1e-12);
+  check('no horizontal reaction (gravity only)', Math.abs(r.nodes[0].rx) < 1e-9 * (W_AC + W_BC + W_AB), `${r.nodes[0].rx}`);
+});
+
+testCase('Self-weight with zero, missing and invalid densities', () => {
+  const { m, A, B, C, fir, steel } = swTruss();
+  const sw = TM.addSelfWeightCase(m);
+  fir.density = 0;
+  check('density 0: the fir tie AB weighs nothing, and the other members are unchanged',
+    TM.memberSelfWeight(m.members[2]).W === 0 && Math.abs(fyOf(m, A, sw) / (-W_AC / 2) - 1) < 1e-14 && Math.abs(fyOf(m, B, sw) / (-W_BC / 2) - 1) < 1e-14);
+  check('... and no warning: 0 is a value the user chose', !TM.validateModel(m).some((w) => /density/.test(w.msg)));
+  fir.density = null;
+  const w0 = TM.memberSelfWeight(m.members[2]);
+  check('no density (null): density reported as null, W = 0, the tie adds nothing', w0.density === null && w0.W === 0 && Math.abs(fyOf(m, A, sw) / (-W_AC / 2) - 1) < 1e-14);
+  same('... and a warning names the material', TM.validateModel(m).map((w) => w.msg), ['Material "Douglas Fir Timber" has no density, so its member carries no weight in "Self-weight".']);
+  for (const bad of [NaN, -5, Infinity, '7850']) {
+    steel.density = bad;
+    check(`an invalid density in memory (${String(bad)}) counts as none: AC adds nothing`, TM.memberSelfWeight(m.members[0]).W === 0 && nearly(fyOf(m, C, sw), -W_BC / 2));
+  }
+  steel.density = null;
+  check('with neither steel nor fir weighing anything, only the aluminium member loads its ends', TM.selfWeightLoads(m).size === 2 && !TM.selfWeightLoads(m).has(A));
+  same('two materials without density, two warnings (members counted)', TM.validateModel(m).map((w) => w.msg),
+    ['Material "Structural Steel" has no density, so its member carries no weight in "Self-weight".', 'Material "Douglas Fir Timber" has no density, so its member carries no weight in "Self-weight".']);
+  TM.removeLoadCase(m, sw);
+  check('without a self-weight case, a missing density is not a warning', TM.validateModel(m).length === 0);
+  const empty = TM.emptyModel(); TM.addSelfWeightCase(empty);
+  check('a model without members has no self-weight loads', TM.selfWeightLoads(empty).size === 0);
+});
+
+testCase('Self-weight is recalculated after every change and never adds up', () => {
+  const { m, A, B, C, gS, gF, steel } = swTruss();
+  const sw = TM.addSelfWeightCase(m), first = loadsJSON(m, sw);
+  C.y = 8; // geometry: AC and BC become √73 m long
+  near('after moving the apex to (3, 8): C carries (7850 · 0.002 + 2700 · 0.001) · √73 · g / 2', fyOf(m, C, sw), -(7850 * 0.002 + 2700 * 0.001) * Math.sqrt(73) * G / 2, 1e-14);
+  C.y = 4;
+  gS.A = 4000 * TM.MM2; // section: AC twice as heavy
+  near('after doubling the area of AC: A carries (2 · 769.822025 + 317.73546) / 2', fyOf(m, A, sw), -(2 * W_AC + W_AB) / 2, 1e-14);
+  gS.A = 2000 * TM.MM2;
+  steel.density = 2 * 7850; // material
+  near('after doubling the density of steel: C carries (2 · 769.822025 + 132.389775) / 2', fyOf(m, C, sw), -(2 * W_AC + W_BC) / 2, 1e-14);
+  steel.density = 7850;
+  m.members[2].group = gS; // the tie AB is now steel 2000 mm²: 7850 · 0.002 · 6 · g = 94.2 g = 923.78643 N
+  near('after giving AB another section: B carries (132.389775 + 923.78643) / 2', fyOf(m, B, sw), -(W_BC + 923.78643) / 2, 1e-14);
+  m.members[2].group = gF;
+  const bc = m.members.splice(1, 1)[0]; // deleting BC
+  near('after deleting BC: C carries only half of AC', fyOf(m, C, sw), -W_AC / 2, 1e-14);
+  m.members.splice(1, 0, bc);
+  check('after undoing every change, the loads are exactly the first ones again', loadsJSON(m, sw) === first);
+  const runs = [1, 2, 3, 4, 5].map(() => JSON.stringify([...TM.selfWeightLoads(m)].map(([n, v]) => [m.nodes.indexOf(n), v])));
+  check('computing them five times gives five identical results', runs.every((x) => x === runs[0]));
+  const inputs = [1, 2, 3].map(() => JSON.stringify(TM.toAnalysisInput(m, { loadFactor: 1, loadCase: sw })));
+  check('building the solver input three times gives identical input', inputs.every((x) => x === inputs[0]));
+  check('nothing is stored in the case: its Maps stay empty', sw.loads.size === 0 && sw.settlements.size === 0);
+  let text = JSON.stringify(TM.serialize(m));
+  for (let k = 0; k < 3; k++) {
+    const back = TM.readModel(JSON.parse(text)).model, again = JSON.stringify(TM.serialize(back));
+    check(`save and read cycle ${k + 1}: identical file, the same loads, nothing added`, again === text && loadsJSON(back, back.loadCases[1]) === first);
+    text = again;
+  }
+});
+
+testCase('The self-weight case is separate from the load cases the user fills', () => {
+  const { m, A, C } = swTruss();
+  const lc1 = m.loadCases[0];
+  TM.setNodeLoad(m, C, 1000, -10000);
+  const before = analyse(m), loads1 = loadsJSON(m, lc1);
+  const sw = TM.addSelfWeightCase(m);
+  check('adding it appends one case, named "Self-weight", marked generated, and does not make it active',
+    m.loadCases.length === 2 && m.loadCases[1] === sw && sw.name === 'Self-weight' && TM.isGeneratedCase(sw) && !TM.isGeneratedCase(lc1) && m.activeCase === lc1 && TM.selfWeightCase(m) === sw);
+  check('adding it again returns the same case: a model has at most one', TM.addSelfWeightCase(m) === sw && m.loadCases.length === 2);
+  const after = analyse(m);
+  check('"Load case 1" keeps its loads and its results exactly', loadsJSON(m, lc1) === loads1 &&
+    after.members.every((x, i) => Object.is(x.force, before.members[i].force)) && after.nodes.every((n, i) => Object.is(n.uy, before.nodes[i].uy)));
+  check('a load cannot be put into the self-weight case (setNodeLoad refuses and changes nothing)', TM.setNodeLoad(m, C, 5, 5, sw) === false && sw.loads.size === 0 && nearly(fyOf(m, C, sw), -(W_AC + W_BC) / 2));
+  check('nor a settlement', TM.setNodeSettlement(m, A, 0, -0.01, sw) === false && sw.settlements.size === 0);
+  check('setNodeLoad still works, and says so, in an ordinary case', TM.setNodeLoad(m, A, 0, -1, lc1) === true && TM.nodeLoad(m, A, lc1).fy === -1);
+  TM.setNodeLoad(m, A, 0, 0, lc1);
+  check('the active case reads its own loads; the self-weight case reads the generated ones',
+    JSON.stringify(TM.nodeLoad(m, C)) === '{"fx":1000,"fy":-10000}' && TM.nodeLoad(m, C, sw).fx === 0 && nearly(TM.nodeLoad(m, C, sw).fy, -(W_AC + W_BC) / 2));
+  const in1 = TM.toAnalysisInput(m, { loadFactor: 1 }), inS = TM.toAnalysisInput(m, { loadFactor: 1, loadCase: sw });
+  check('the solver input of each case holds only its own loads', in1.nodes[2].fy === -10000 && in1.nodes[0].fy === 0 && inS.nodes[2].fx === 0 && nearly(inS.nodes[0].fy, -(W_AC + W_AB) / 2));
+  TM.setNodeLoad(m, C, 0, -20000);
+  check('editing "Load case 1" does not change the self-weight loads', nearly(fyOf(m, C, sw), -(W_AC + W_BC) / 2));
+  TM.setActiveLoadCase(m, sw);
+  check('the self-weight case can be the active case, and nodeLoad then reads it', m.activeCase === sw && nearly(fyOf(m, C), -(W_AC + W_BC) / 2));
+  check('deleting it leaves "Load case 1" active, with its loads', TM.removeLoadCase(m, sw) && m.activeCase === lc1 && m.loadCases.length === 1 && TM.nodeLoad(m, C).fy === -20000);
+});
+
+testCase('The self-weight case is saved, read and restored', () => {
+  const { m, C } = swTruss();
+  const sw = TM.addSelfWeightCase(m);
+  TM.setNodeLoad(m, C, 0, -10000);
+  const f = TM.serialize(m);
+  same('it is written as generated, by name, without loads or settlements (they are computed again when read)',
+    f.loadCases[1], { id: 2, name: 'Self-weight', generated: 'self-weight', loads: [], settlements: [] });
+  check('an ordinary case has no "generated" field', !('generated' in f.loadCases[0]));
+  const r = TM.readModel(copy(f));
+  check('reading it back: the case is generated again, with no notes', TM.isGeneratedCase(r.model.loadCases[1]) && !TM.isGeneratedCase(r.model.loadCases[0]) && r.notes.length === 0);
+  check('... its loads are the same as before saving', loadsJSON(r.model, r.model.loadCases[1]) === loadsJSON(m, sw));
+  check('... and the round trip is exact', JSON.stringify(TM.serialize(r.model)) === JSON.stringify(f));
+  TM.setActiveLoadCase(m, sw);
+  const ra = TM.readModel(TM.serialize(m)).model;
+  check('when it is the active case, it is active again after reading', ra.activeCase === ra.loadCases[1] && TM.isGeneratedCase(ra.activeCase));
+  const edited = copy(f); edited.loadCases[1].loads = [{ node: 3, fx: 0, fy: -1 }];
+  const re = TM.readModel(edited);
+  check('loads stored with the generated case (an edited file) are not applied, the generated ones are used, and a note says so',
+    re.notes.length === 1 && /generated self-weight case/.test(re.notes[0].msg) && nearly(fyOf(re.model, re.model.nodes[2], re.model.loadCases[1]), -(W_AC + W_BC) / 2));
+  const unknown = copy(f); unknown.loadCases[0].generated = 'wind';
+  const ru = TM.readModel(unknown);
+  check('a case marked generated by a kind this version does not know is read as an ordinary case, with its loads, and a note',
+    !TM.isGeneratedCase(ru.model.loadCases[0]) && TM.nodeLoad(ru.model, ru.model.nodes[2], ru.model.loadCases[0]).fy === -10000 && ru.notes.length === 1 && /cannot generate/.test(ru.notes[0].msg));
+  const K = TM.SESSION_KEYS, st = fakeStorage();
+  const sv = TM.saveStoredSession(st, K, { model: m, settings: { grid: 1 }, view: { zoom: 3 } }, { migrationPending: false, corruptV2: null });
+  const L = TM.loadStoredSession(st, K);
+  check('an autosaved session keeps it: saved and verified, then restored as the active generated case with the same loads',
+    sv.saved && L.source === 'v2' && TM.isGeneratedCase(L.model.activeCase) && loadsJSON(L.model, L.model.activeCase) === loadsJSON(m, sw) && L.notes.length === 0);
+  check('... with the material densities', JSON.stringify(L.model.materials.map((x) => x.density)) === JSON.stringify(m.materials.map((x) => x.density)));
+  const undoText = JSON.stringify({ model: TM.serialize(m) }), undone = TM.deserialize(JSON.parse(undoText).model);
+  check('an undo snapshot (the serialised model) restores it too', TM.isGeneratedCase(undone.loadCases[1]) && loadsJSON(undone, undone.loadCases[1]) === loadsJSON(m, sw));
+});
+
+testCase('Self-weight and the load factor λ', () => {
+  const { m, C } = swTruss();
+  const sw = TM.addSelfWeightCase(m);
+  const in1 = TM.toAnalysisInput(m, { loadFactor: 1, loadCase: sw }), in2 = TM.toAnalysisInput(m, { loadFactor: 2, loadCase: sw });
+  check('λ = 2 doubles every generated load', in2.nodes.every((n, i) => n.fy === 2 * in1.nodes[i].fy && n.fx === 0));
+  const r1 = analyse(m, { loadFactor: 1, loadCase: sw }), r2 = analyse(m, { loadFactor: 2, loadCase: sw }), r0 = analyse(m, { loadFactor: 0, loadCase: sw });
+  closeArray('λ = 2: member forces N(2) = 2·N(1)', r2.members.map((x) => x.force), r1.members.map((x) => 2 * x.force), 1e-12);
+  closeArray('λ = 2: reactions R(2) = 2·R(1)', r2.nodes.map((n) => n.ry), r1.nodes.map((n) => 2 * n.ry), 1e-12);
+  check('λ = 0: no loads, no member forces, no reactions', r0.ok && r0.members.every((x) => x.force === 0) && r0.nodes.every((n) => n.rx === 0 && n.ry === 0));
+  check('λ does not change the stored model: the generated loads at λ = 1 are unchanged afterwards', nearly(fyOf(m, C, sw), -(W_AC + W_BC) / 2));
+});
+
+testCase('Self-weight on the nine examples', () => {
+  for (const [key] of TM.EXAMPLES) {
+    const m = TM.buildExample(key), before = analyse(m);
+    const sw = TM.addSelfWeightCase(m), after = analyse(m);
+    check(`${key}: adding the self-weight case leaves "Load case 1" and its results exactly as they were`, m.activeCase === m.loadCases[0] && before.ok === after.ok &&
+      (!before.ok || (after.members.every((x, i) => Object.is(x.force, before.members[i].force)) && after.nodes.every((n, i) => Object.is(n.ry, before.nodes[i].ry)))));
+    const total = m.members.reduce((t, e) => t + TM.memberSelfWeight(e).W, 0), gen = [...TM.selfWeightLoads(m).values()];
+    check(`${key}: every member has a density, so the total weight is positive, and every generated load is vertical and downward`,
+      total > 0 && m.members.every((e) => TM.memberSelfWeight(e).density > 0) && gen.every((v) => v.fx === 0 && v.fy < 0));
+    near(`${key}: the generated loads add up to the total weight`, -gen.reduce((t, v) => t + v.fy, 0), total, 1e-13);
+    const r = analyse(m, { loadFactor: 1, loadCase: sw });
+    if (key === 'mechanism') { check('mechanism: still unstable under its own weight, so no results', !r.ok); continue; }
+    check(`${key}: the self-weight case solves`, r.ok);
+    near(`${key}: the vertical reactions carry the total weight (ΣR_y = ΣW)`, r.nodes.reduce((t, n) => t + n.ry, 0), total, 1e-10);
+    check(`${key}: no net horizontal reaction`, Math.abs(r.nodes.reduce((t, n) => t + n.rx, 0)) < 1e-9 * total);
+    const f = JSON.stringify(TM.serialize(m));
+    check(`${key}: with the self-weight case, the round trip is exact`, JSON.stringify(TM.serialize(TM.readModel(JSON.parse(f)).model)) === f);
+  }
 });
 
 testCase('The nine example structures', () => {

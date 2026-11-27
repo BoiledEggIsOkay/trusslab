@@ -629,6 +629,15 @@
     near('doubling the steel density doubles the self-weight (recalculated at once)', sumRy(T.results()), 4 * 384.9110125, 1e-12);
     ctrl('z'); await settle();
     check('Ctrl+Z restores the density', el(densitySel).value === '7850' && Math.abs(sumRy(T.results()) / (2 * 384.9110125) - 1) < 1e-12);
+    setValue(densitySel, ''); await settle(); // no density: the case must say it is incomplete, never pass for the whole weight
+    check('clearing the steel density leaves the members weightless: ΣR_y = 0', el(densitySel).value === '' && sumRy(T.results()) === 0);
+    check('... and the case is marked incomplete in the health report, naming the members, and on the canvas',
+      /Incomplete self-weight: members M1, M2/.test(text('#health')) && /from 0 of 2 members only/.test(text('#health')) && /Self-weight incomplete/.test(text('#hud')), text('#hud'));
+    await click(3, 4);
+    check('... and in the Inspector for the apex node', /Incomplete: M1, M2 have no density/.test(text('#inspector')));
+    ctrl('z'); await settle();
+    check('Ctrl+Z restores the density, and the case is no longer marked incomplete',
+      el(densitySel).value === '7850' && !/Incomplete/.test(text('#health')) && !/incomplete/.test(text('#hud')) && Math.abs(sumRy(T.results()) / (2 * 384.9110125) - 1) < 1e-12);
     setValue('#numLoadFactor', '2'); await settle();
     near('λ = 2 doubles the self-weight reactions', sumRy(T.results()), 4 * 384.9110125, 1e-12);
     setValue('#numLoadFactor', '1'); await settle();

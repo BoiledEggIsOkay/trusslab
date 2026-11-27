@@ -35,7 +35,7 @@
     SUPPORT_TYPES, SUPPORT_SHORT, setSupport, supportRestraint, serialize, readModel, deserialize, validateModel,
     EXAMPLES, buildExample, toAnalysisInput,
     addLoadCase, removeLoadCase, setActiveLoadCase, removeNodeActions, nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement,
-    GRAVITY, validDensity, isGeneratedCase, memberSelfWeight, selfWeightCase, addSelfWeightCase,
+    GRAVITY, validDensity, isGeneratedCase, memberSelfWeight, selfWeightCase, addSelfWeightCase, selfWeightSummary,
     SESSION_KEYS, SMOKE_SESSION_KEYS, loadStoredSession, saveStoredSession,
   } = TrussModel;
 
@@ -827,6 +827,10 @@
     const lines = [];
     if (info.mode === 'deformed') lines.push(`<b>Deflection ×${fmt(state.s.scale, 4)}</b> · dashed = undeformed`);
     if (state.model.loadCases.length > 1) lines.push(`Load case: <b>${esc(state.model.activeCase.name)}</b>${isGeneratedCase(state.model.activeCase) ? ' (generated)' : ''}`);
+    if (isGeneratedCase(state.model.activeCase)) {
+      const sw = selfWeightSummary(state.model);
+      if (!sw.complete) lines.push(`<b>Self-weight incomplete:</b> ${plural(sw.missing.length, 'member')} without density`);
+    }
     if (state.s.loadFactor !== 1) lines.push(`<b>Load factor λ = ${fmt(state.s.loadFactor, 4)}</b>`);
     if (r && r.ok) lines.push(`δmax ${fD(r.summary.maxDisp.value)} ${state.s.dispUnit} · SFmin ${fmt(r.summary.minSF.value, 3)}`);
     const html = lines.join('<br>');
@@ -1375,7 +1379,7 @@
         <div class="mat-props">
           <label>E <input class="num" data-mf="E" value="${inVal(m.E / GPA)}" title="Young's modulus, GPa"><span class="u">GPa</span></label>
           <label>σ<sub>y</sub> <input class="num" data-mf="fy" value="${inVal(m.fy / MPA)}" title="Yield / limit stress, MPa"><span class="u">MPa</span></label>
-          <label>ρ <input class="num" data-mf="density" value="${validDensity(m.density) ? inVal(m.density) : ''}" placeholder="not set" title="Density for self-weight, kg/m³ (steel 7850, aluminium 2700, Douglas fir about 540). Empty means not set: members of this material then carry no self-weight."><span class="u">kg/m³</span></label>
+          <label>ρ <input class="num" data-mf="density" value="${validDensity(m.density) ? inVal(m.density) : ''}" placeholder="not set" title="Density for self-weight, kg/m³ (steel 7850, aluminium 2700, Douglas fir about 540 at 12 % moisture content). Empty means not set: members of this material then carry no self-weight."><span class="u">kg/m³</span></label>
         </div>
         ${m.preset === 'fir' ? `<div class="mat-note">${esc(FIR_NOTE)}</div>` : ''}
       </div>`).join('');
@@ -1660,10 +1664,12 @@
   /** The node's load in the generated self-weight case, read-only, with where it comes from. */
   function selfWeightNodeText(n, L, caseName) {
     const fu = state.s.forceUnit;
-    const parts = state.model.members.filter((e) => e.n1 === n || e.n2 === n)
-      .map((e) => { const w = memberSelfWeight(e); return w.density === null ? `M${memberNo(e)} none (no density)` : `M${memberNo(e)} ${fF(w.W / 2)}`; });
+    const at = state.model.members.filter((e) => e.n1 === n || e.n2 === n);
+    const parts = at.map((e) => { const w = memberSelfWeight(e); return w.density === null ? `M${memberNo(e)} none (no density)` : `M${memberNo(e)} ${fF(w.W / 2)}`; });
+    const without = at.filter((e) => memberSelfWeight(e).density === null).map((e) => `M${memberNo(e)}`);
     return `<div class="sub-h">Self-weight load in “${caseName}” (generated, before λ)</div>
       <div class="form-grid"><label>F<sub>y</sub></label><div class="inline"><span>${fF(L.fy)}</span><span class="u">${fu}</span></div></div>
+      ${without.length ? `<p class="note warn-note">Incomplete: ${without.join(', ')} ${without.length > 1 ? 'have' : 'has'} no density, so ${without.length > 1 ? 'their' : 'its'} weight is not included in this load. Enter the density ρ under Materials.</p>` : ''}
       <p class="note">${parts.length ? `Half the weight of each member at this node, acting downward: ${parts.join(', ')} ${fu}.` : 'No member is connected to this node, so it carries no self-weight.'} Recalculated whenever the geometry, a section or a material changes. Loads cannot be entered in this case.</p>`;
   }
   function memberForm(e) {
@@ -1963,11 +1969,17 @@
       <div class="lg-keys"><span><i style="background:#ef4444"></i>Compression</span><span><i style="background:#3b82f6"></i>Tension</span><span><i style="background:#6b7280"></i>Zero</span></div>`;
     lg.hidden = false;
   }
-  /** The health report's explanation of the generated self-weight case: where its loads come from and when they change. */
+  /**
+   * The health report's explanation of the generated self-weight case: where its loads come from, when they change,
+   * and, when a member's material has no density, that the case is incomplete (never shown as the whole weight).
+   */
   function selfWeightBlock() {
-    let total = 0, counted = 0;
-    state.model.members.forEach((e) => { const w = memberSelfWeight(e); if (w.density !== null) { total += w.W; counted++; } });
-    return `<div class="sub-h">Self-weight (generated)</div><p class="note">Each member weighs W = ρ·A·L·g: its material's density, its section area, its length, and g = ${GRAVITY} m/s². Half of W acts downward at each end node. Total ${fF(total)} ${state.s.forceUnit} from ${plural(counted, 'member')}, before λ. Recalculated whenever the geometry, a section or a material changes.</p>`;
+    const sw = selfWeightSummary(state.model), fu = state.s.forceUnit, k = sw.missing.length;
+    const names = sw.missing.slice(0, 8).map((i) => `M${i + 1}`).join(', ') + (k > 8 ? ` and ${k - 8} more` : '');
+    const missing = sw.complete ? '' : `<p class="note warn-note">Incomplete self-weight: ${k > 1 ? 'members' : 'member'} ${names} (${sw.materials.map((m) => `“${esc(m.name)}”`).join(', ')}) ${k > 1 ? 'have' : 'has'} no density, so ${k > 1 ? 'their' : 'its'} weight is not included. Enter the density ρ under Materials.</p>`;
+    const total = sw.complete ? `Total ${fF(sw.total)} ${fu} from ${sw.members === 1 ? 'the member' : `all ${sw.members} members`}, before λ.`
+      : `Total ${fF(sw.total)} ${fu} from ${sw.counted} of ${sw.members} members only, before λ.`;
+    return `<div class="sub-h">Self-weight (generated)</div>${missing}<p class="note">Each member weighs W = ρ·A·L·g: its material's density, its section area, its length, and g = ${GRAVITY} m/s². Half of W acts downward at each end node. ${total} Recalculated whenever the geometry, a section or a material changes.</p>`;
   }
   function renderHealth() {
     const box = $('#health');
@@ -2323,6 +2335,12 @@
     if (needOk && !r2.ok) toast('Exporting an incomplete report: ' + (r2.mechanism ? 'the structure is unstable.' : 'the model has errors.'), 'warn');
     return r2;
   }
+  /** How the report describes the generated self-weight case, including whether it is complete. */
+  function selfWeightMeta(M) {
+    const sw = selfWeightSummary(M);
+    return { generated: 'self-weight', selfWeight: 'W = rho*A*L*g per member, W/2 downward at each end node', g: GRAVITY,
+      complete: sw.complete, totalBeforeLoadFactor_N: sw.total, membersWithoutDensity: sw.missing.map((k) => k + 1) };
+  }
   function reportObject(r) {
     const M = state.model;
     const D = r.diagnostics || {};
@@ -2330,7 +2348,7 @@
     const inp = toAnalysisInput(M, { loadFactor: r.loadFactor });
     const obj = {
       meta: { app: 'TrussLab 2D Truss FEA & Load Simulator', solver: FEA.VERSION, generated: new Date().toISOString(), units: 'SI base units: m, N, Pa, m^2, m^4; angles in degrees',
-        loadCase: Object.assign({ id: M.loadCases.indexOf(M.activeCase) + 1, name: M.activeCase.name }, isGeneratedCase(M.activeCase) ? { generated: 'self-weight', selfWeight: 'W = rho*A*L*g per member, W/2 downward at each end node', g: GRAVITY } : {}), loadFactor: r.loadFactor, loadFactorScales: 'nodal loads and prescribed settlements', targetSF: state.s.targetSF },
+        loadCase: Object.assign({ id: M.loadCases.indexOf(M.activeCase) + 1, name: M.activeCase.name }, isGeneratedCase(M.activeCase) ? selfWeightMeta(M) : {}), loadFactor: r.loadFactor, loadFactorScales: 'nodal loads and prescribed settlements', targetSF: state.s.targetSF },
       model: serialize(M),
       status: r.ok ? 'solved' : r.mechanism ? 'unstable' : 'invalid',
       errors: r.errors.map((e) => e.msg), warnings: validateModel(M).map((w) => w.msg).concat(r.warnings.map((w) => w.msg)),
@@ -2384,14 +2402,17 @@
     L.push(csvRow(['# units', o.meta.units]));
     L.push(csvRow(['title', state.model.title]));
     L.push(csvRow(['status', o.status]));
-    L.push(csvRow(['load case', o.meta.loadCase.name]));
+    const lcm = o.meta.loadCase;
+    L.push(csvRow(['load case', lcm.name].concat(lcm.generated ? [`generated self-weight: ${lcm.selfWeight}, g = ${lcm.g} m/s^2`] : [])));
+    if (lcm.generated) L.push(csvRow(['self-weight before load factor [N]', lcm.totalBeforeLoadFactor_N,
+      lcm.complete ? 'complete: every member has a density' : `incomplete: no density for members ${lcm.membersWithoutDensity.map((k) => `M${k}`).join(' ')}`]));
     L.push(csvRow(['load factor', r.loadFactor, 'scales nodal loads and prescribed settlements']));
     L.push(csvRow(['target SF', state.s.targetSF]));
     o.errors.forEach((e) => L.push(csvRow(['error', e])));
     o.warnings.forEach((w) => L.push(csvRow(['warning', w])));
     L.push('');
-    L.push('MATERIALS'); L.push(csvRow(['id', 'name', 'E_Pa', 'fy_Pa']));
-    state.model.materials.forEach((m, i) => L.push(csvRow([i + 1, m.name, m.E, m.fy])));
+    L.push('MATERIALS'); L.push(csvRow(['id', 'name', 'E_Pa', 'fy_Pa', 'density_kg_m3']));
+    state.model.materials.forEach((m, i) => L.push(csvRow([i + 1, m.name, m.E, m.fy, validDensity(m.density) ? m.density : ''])));
     L.push(''); L.push('SECTIONS'); L.push(csvRow(['id', 'name', 'material', 'shape', 'A_m2', 'I_m4']));
     state.model.groups.forEach((g, i) => L.push(csvRow([i + 1, g.name, g.material.name, g.shape.type, g.A, g.I])));
     L.push(''); L.push('NODES');
@@ -2442,7 +2463,8 @@
     if (!r.K) { toast('Matrices are not available: ' + firstMsg(r), 'bad'); return; }
     const freeL = Array.from(r.free, (d) => r.dofLabels[d]);
     const o = {
-      meta: { generated: new Date().toISOString(), units: 'K in N/m, F and R in N, u in m', loadCase: state.model.activeCase.name, loadFactor: r.loadFactor, note: 'DOF labels: node number + axis; a prime marks a rotated support frame' },
+      meta: Object.assign({ generated: new Date().toISOString(), units: 'K in N/m, F and R in N, u in m', loadCase: state.model.activeCase.name, loadFactor: r.loadFactor, note: 'DOF labels: node number + axis; a prime marks a rotated support frame' },
+        isGeneratedCase(state.model.activeCase) ? { selfWeight: selfWeightMeta(state.model) } : {}),
       dofLabels: r.dofLabels, K: matrixToRows(r.K, r.ndof),
       Krotated: r.rotated.length ? matrixToRows(r.Kt, r.ndof) : null,
       freeDOFs: freeL, restrainedDOFs: Array.from(r.fixed, (d) => r.dofLabels[d]),

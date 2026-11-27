@@ -59,7 +59,8 @@ testCase('Loading and API', () => {
     'supportRestraint', 'makeLoadCase', 'addLoadCase', 'removeLoadCase', 'setActiveLoadCase', 'removeNodeActions', 'nodeLoad', 'setNodeLoad',
     'nodeSettlement', 'setNodeSettlement', 'modelHasSettlement', 'FORMAT_VERSION', 'serialize', 'readModel', 'deserialize', 'validateModel',
     'EXAMPLES', 'buildExample', 'toAnalysisInput', 'SESSION_KEYS', 'SMOKE_SESSION_KEYS', 'loadStoredSession', 'saveStoredSession', 'backupUnreadable',
-    'caseLoads', 'GRAVITY', 'SELF_WEIGHT', 'validDensity', 'isGeneratedCase', 'memberSelfWeight', 'selfWeightLoads', 'selfWeightCase', 'addSelfWeightCase'];
+    'caseLoads', 'GRAVITY', 'SELF_WEIGHT', 'validDensity', 'isGeneratedCase', 'memberSelfWeight', 'selfWeightLoads', 'selfWeightCase', 'addSelfWeightCase',
+    'selfWeightSummary'];
   const missing = want.filter((k) => !(k in TM));
   check('TrussModel exports the whole model API', missing.length === 0, `missing ${missing.join(', ')}`);
   check('model.js loaded and works with no DOM present', typeof document === 'undefined' && typeof TM.buildExample('aframe') === 'object');
@@ -820,6 +821,12 @@ testCase('Material density (kg/m³)', () => {
     ['steel', 'aluminum', 'fir', 'custom'].map((k) => TM.MATERIAL_PRESETS[k].density), [7850, 2700, 540, null]);
   same('makeMaterial takes the preset density; a custom or unknown material starts with no density, not an invented one',
     [TM.makeMaterial('steel').density, TM.makeMaterial('fir').density, TM.makeMaterial('custom').density, TM.makeMaterial('unobtainium').density], [7850, 540, null, null]);
+  // Douglas fir: an approximate representative value at 12 % moisture content (maintainer decision, milestone 4). Coast
+  // Douglas-fir has a specific gravity of 0.48 at 12 % MC (USDA Forest Products Laboratory, Wood Handbook 2021, Table 5–3b),
+  // so its density at 12 % MC is 1000 kg/m³ · 0.48 · 1.12 = 537.6 kg/m³, rounded to 540.
+  check('Douglas fir: 1000 · 0.48 · 1.12 = 537.6 kg/m³, rounded to the nearest 10, is the preset\'s 540 kg/m³',
+    Math.abs(1000 * 0.48 * 1.12 - 537.6) < 1e-12 && Math.round(1000 * 0.48 * 1.12 / 10) * 10 === TM.MATERIAL_PRESETS.fir.density);
+  check('the fir note calls it an approximate representative value at 12% moisture content', /density, 540 kg\/m³, is an approximate representative value at 12% MC/.test(TM.FIR_NOTE), TM.FIR_NOTE);
   same('a usable density is a finite number, 0 or more', [7850, 0, -1, NaN, Infinity, '7850', null, undefined].map(TM.validDensity), [true, true, false, false, false, false, false, false]);
   const f = TM.serialize(TM.emptyModel());
   same('it is written with each material, in kg/m³', f.materials.map((x) => x.density), [7850, 2700, 540]);
@@ -889,7 +896,12 @@ testCase('Self-weight of members with different lengths, areas and densities sha
 testCase('Self-weight with zero, missing and invalid densities', () => {
   const { m, A, B, C, fir, steel } = swTruss();
   const sw = TM.addSelfWeightCase(m);
+  const full = TM.selfWeightSummary(m);
+  check('every member has a density: the case is complete, and its total is the sum of the three weights',
+    full.complete && full.members === 3 && full.counted === 3 && full.missing.length === 0 && full.materials.length === 0 && nearly(full.total, W_AC + W_BC + W_AB));
   fir.density = 0;
+  check('density 0 counts as set: the case is still complete, and the tie adds nothing to the total',
+    TM.selfWeightSummary(m).complete && nearly(TM.selfWeightSummary(m).total, W_AC + W_BC));
   check('density 0: the fir tie AB weighs nothing, and the other members are unchanged',
     TM.memberSelfWeight(m.members[2]).W === 0 && Math.abs(fyOf(m, A, sw) / (-W_AC / 2) - 1) < 1e-14 && Math.abs(fyOf(m, B, sw) / (-W_BC / 2) - 1) < 1e-14);
   check('... and no warning: 0 is a value the user chose', !TM.validateModel(m).some((w) => /density/.test(w.msg)));
@@ -897,6 +909,11 @@ testCase('Self-weight with zero, missing and invalid densities', () => {
   const w0 = TM.memberSelfWeight(m.members[2]);
   check('no density (null): density reported as null, W = 0, the tie adds nothing', w0.density === null && w0.W === 0 && Math.abs(fyOf(m, A, sw) / (-W_AC / 2) - 1) < 1e-14);
   same('... and a warning names the material', TM.validateModel(m).map((w) => w.msg), ['Material "Douglas Fir Timber" has no density, so its member carries no weight in "Self-weight".']);
+  const before = JSON.stringify(TM.serialize(m)), part = TM.selfWeightSummary(m);
+  same('the summary marks the case incomplete, naming member 3 (AB) and its material, and its total leaves AB out',
+    [part.complete, part.counted, part.members, part.missing, part.materials.map((x) => x.name)], [false, 2, 3, [2], ['Douglas Fir Timber']]);
+  check('... total W_AC + W_BC, the members that have a density', nearly(part.total, W_AC + W_BC));
+  check('... and reading the summary changes nothing in the model', JSON.stringify(TM.serialize(m)) === before);
   for (const bad of [NaN, -5, Infinity, '7850']) {
     steel.density = bad;
     check(`an invalid density in memory (${String(bad)}) counts as none: AC adds nothing`, TM.memberSelfWeight(m.members[0]).W === 0 && nearly(fyOf(m, C, sw), -W_BC / 2));
@@ -905,10 +922,43 @@ testCase('Self-weight with zero, missing and invalid densities', () => {
   check('with neither steel nor fir weighing anything, only the aluminium member loads its ends', TM.selfWeightLoads(m).size === 2 && !TM.selfWeightLoads(m).has(A));
   same('two materials without density, two warnings (members counted)', TM.validateModel(m).map((w) => w.msg),
     ['Material "Structural Steel" has no density, so its member carries no weight in "Self-weight".', 'Material "Douglas Fir Timber" has no density, so its member carries no weight in "Self-weight".']);
+  same('the summary lists both members and both materials, in material order', [TM.selfWeightSummary(m).missing, TM.selfWeightSummary(m).materials.map((x) => x.name)],
+    [[0, 2], ['Structural Steel', 'Douglas Fir Timber']]);
   TM.removeLoadCase(m, sw);
   check('without a self-weight case, a missing density is not a warning', TM.validateModel(m).length === 0);
   const empty = TM.emptyModel(); TM.addSelfWeightCase(empty);
   check('a model without members has no self-weight loads', TM.selfWeightLoads(empty).size === 0);
+  const es = TM.selfWeightSummary(empty);
+  check('... and nothing is missing from it: complete, with a total of 0', es.complete && es.members === 0 && es.total === 0);
+});
+
+testCase('Missing densities are never filled in from a preset, even when E and σy still equal the preset', () => {
+  // maintainer decision, milestone 4: existing files load with density not set; a self-weight case then warns and is incomplete
+  const P = TM.MATERIAL_PRESETS, f = TM.serialize(TM.emptyModel()); // steel, aluminium and fir with their presets' E and fy
+  check('precondition: the three materials have exactly their presets\' E and fy', f.materials.every((x) => x.E === P[x.preset].E && x.fy === P[x.preset].fy));
+  const without = copy(f); without.materials.forEach((x) => { delete x.density; });
+  same('version 2 without densities: steel, aluminium and fir all read as not set', TM.readModel(without).model.materials.map((x) => x.density), [null, null, null]);
+  const nulls = copy(f); nulls.materials.forEach((x) => { x.density = null; });
+  same('... and the same with density: null', TM.readModel(nulls).model.materials.map((x) => x.density), [null, null, null]);
+  const v1 = copy(V1_FILE);
+  v1.materials = ['steel', 'aluminum', 'fir'].map((k, i) => ({ id: i + 1, name: P[k].name, preset: k, E: P[k].E, fy: P[k].fy, color: P[k].color }));
+  same('a version 1 file with the three presets\' exact E and fy: no density for any', TM.readModel(copy(v1)).model.materials.map((x) => x.density), [null, null, null]);
+  const K = TM.SESSION_KEYS;
+  const st1 = fakeStorage({ [K.v1]: JSON.stringify({ model: v1, settings: {}, view: {} }) }), L1 = TM.loadStoredSession(st1, K);
+  check('a version 1 session reads without densities', L1.source === 'v1' && L1.model.materials.every((x) => x.density === null));
+  const sv = TM.saveStoredSession(st1, K, { model: L1.model, settings: L1.settings, view: L1.view }, { migrationPending: L1.migrationPending, corruptV2: L1.corruptV2 });
+  check('... and its migration writes them as null, not as the preset values', sv.saved && JSON.parse(st1.data.get(K.v2)).model.materials.every((x) => x.density === null));
+  const st2 = fakeStorage({ [K.v2]: JSON.stringify({ model: without, settings: {}, view: {} }) }), L2 = TM.loadStoredSession(st2, K);
+  check('a version 2 session from before milestone 4 reads without densities', L2.source === 'v2' && L2.model.materials.every((x) => x.density === null));
+  const mv = TM.readModel(copy(v1)).model;
+  TM.addSelfWeightCase(mv);
+  same('with a self-weight case, the model warns that steel has no density', TM.validateModel(mv).map((w) => w.msg),
+    ['Material "Structural Steel" has no density, so its 2 members carry no weight in "Self-weight".']);
+  const s = TM.selfWeightSummary(mv);
+  check('... and the case is incomplete, with no weight at all, rather than presented as a complete self-weight of 0',
+    !s.complete && s.total === 0 && s.missing.join() === '0,1' && TM.selfWeightLoads(mv).size === 0);
+  mv.materials[0].density = 7850;
+  check('entering the density completes it, and the warning goes', TM.selfWeightSummary(mv).complete && TM.validateModel(mv).length === 0);
 });
 
 testCase('Self-weight is recalculated after every change and never adds up', () => {

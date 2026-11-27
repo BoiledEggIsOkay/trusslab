@@ -84,9 +84,11 @@
    * ===================================================================== */
   /**
    * Densities ρ in kg/m³ (self-weight, milestone 4): structural steel 7850 and 6061-T6 aluminium 2700, the usual
-   * values; coast Douglas fir 540, from its specific gravity 0.48 at 12 % moisture content (USDA Wood Handbook, the
-   * source of its strength) × 1.12 for the water it holds × 1000 kg/m³ = 538, rounded. A custom material has no
-   * density until the user enters one: an invented value would give a wrong self-weight without any warning.
+   * values. Douglas fir 540 is an approximate representative value at 12 % moisture content: coast Douglas-fir has a
+   * specific gravity of 0.48 at 12 % moisture content (USDA Forest Products Laboratory, Wood Handbook, 2021,
+   * Table 5–3b), and 1000 kg/m³ × 0.48 × 1.12 (the water held at 12 %) = 537.6 kg/m³, rounded to 540. A custom
+   * material has no density until the user enters one: an invented value would give a wrong self-weight without any
+   * warning. A missing density is never filled in from a preset either (see readDensity).
    */
   const MATERIAL_PRESETS = {
     steel: { name: 'Structural Steel', E: 200e9, fy: 250e6, density: 7850, color: '#94a3b8' },
@@ -94,7 +96,7 @@
     fir: { name: 'Douglas Fir Timber', E: 11e9, fy: 49.9e6, density: 540, color: '#d6a86b' },
     custom: { name: 'Custom material', E: 100e9, fy: 200e6, density: null, color: '#a78bfa' },
   };
-  const FIR_NOTE = 'Timber has no yield point: the limit is the clear-wood compressive strength ∥ grain, 12% MC (USDA Wood Handbook, coast Douglas-fir). Graded-lumber design values are much lower.';
+  const FIR_NOTE = 'Timber has no yield point: the limit is the clear-wood compressive strength ∥ grain, 12% MC (USDA Wood Handbook, coast Douglas-fir). Graded-lumber design values are much lower. The preset density, 540 kg/m³, is an approximate representative value at 12% MC (USDA Wood Handbook 2021, Table 5–3b).';
   const GROUP_COLORS = ['#38bdf8', '#f472b6', '#a3e635', '#fb923c', '#c084fc', '#2dd4bf', '#facc15', '#f87171', '#60a5fa', '#e879f9'];
 
   const SHAPES = {
@@ -250,6 +252,22 @@
     lc.generated = SELF_WEIGHT;
     model.loadCases.push(lc);
     return lc;
+  }
+  /**
+   * The self-weight case as a whole, for every place that presents it: `total` (N, before λ) of the members whose
+   * material has a density, `missing` the indices of the members whose material has none (they add no weight), and
+   * `materials` those materials, in material order. `complete` is false when any member is missing: an incomplete
+   * self-weight must always be shown as incomplete, never as the structure's whole weight.
+   */
+  function selfWeightSummary(model) {
+    let total = 0;
+    const missing = [], without = new Set();
+    model.members.forEach((e, k) => {
+      const w = memberSelfWeight(e);
+      if (w.density === null) { missing.push(k); without.add(e.group.material); } else total += w.W;
+    });
+    return { total, members: model.members.length, counted: model.members.length - missing.length, missing,
+      materials: model.materials.filter((m) => without.has(m)), complete: missing.length === 0 };
   }
 
   /** Nodal load { fx, fy } in N on `node` in load case `lc` (default: the active case); generated in the self-weight case. */
@@ -414,8 +432,10 @@
 
   /**
    * A material's density from a file. Missing or null means not set: files written before milestone 4 have none,
-   * and the preset is not used to fill it in, because the material may have been changed since. A number of
-   * kg/m³, 0 or more (or a string holding one), is kept; anything else is not set either, and a note says so.
+   * and the preset is never used to fill it in, even when E and fy still equal the preset's, because the material
+   * may have been changed since and a guessed density would give a self-weight nobody entered (maintainer decision,
+   * milestone 4). A number of kg/m³, 0 or more (or a string holding one), is kept; anything else is not set either,
+   * and a note says so.
    */
   function readDensity(v, i, name, notes) {
     if (v === undefined || v === null) return null;
@@ -858,6 +878,7 @@
     nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement, caseLoads,
     // self-weight: material density and the generated dead-load case
     GRAVITY, SELF_WEIGHT, validDensity, isGeneratedCase, memberSelfWeight, selfWeightLoads, selfWeightCase, addSelfWeightCase,
+    selfWeightSummary,
     // file format version 2 (reads version 1 too) and model checks
     FORMAT_VERSION, serialize, readModel, deserialize, validateModel,
     // example structures

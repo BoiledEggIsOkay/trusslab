@@ -14,7 +14,7 @@ Contents: 1 Member checks · 2 Material limit stresses · 3 Results over combina
 
 ## 2. Material limit stresses
 
-`fy` is the yield stress for metals. Timber has no yield point: the Douglas fir preset uses 49.9 MPa, the clear-wood compressive strength parallel to the grain at 12 % moisture content (USDA Wood Handbook). Graded design values are much lower. Keep that warning wherever timber results are shown, and never present the preset as a design value.
+`fy` is the yield stress for metals. Timber has no yield point: the Douglas fir preset uses 49.9 MPa, the clear-wood compressive strength parallel to the grain at 12 % moisture content (USDA Wood Handbook). Graded design values are much lower. Keep that warning wherever timber results are shown, and never present the preset as a design value. Its density, 540 kg/m³, is likewise an approximate representative value at 12 % moisture content (`model-format.md` §1), and is labelled so.
 
 ## 3. Results over combinations
 

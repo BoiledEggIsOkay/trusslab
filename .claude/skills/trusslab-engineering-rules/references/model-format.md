@@ -19,8 +19,8 @@ loadCase = { uid, name, generated: null | 'self-weight', loads: Map(node → { f
 - Array order defines the numbering (N1, M1, load case 1, …) and the solver indices.
 - Units are SI base units: m, N, Pa, m², m⁴, with angles in degrees. `fy` is the yield or limit stress.
 - A model always has at least one load case, and `activeCase` is one of them. `emptyModel()` and every reader create "Load case 1".
-- Material presets: steel E 200 GPa, σy 250 MPa, ρ 7850 kg/m³; 6061-T6 aluminium 68.9 GPa, 276 MPa, 2700 kg/m³; Douglas fir 11 GPa, 49.9 MPa, 540 kg/m³; custom 100 GPa, 200 MPa, no density. Douglas fir's 49.9 MPa is the clear-wood compressive strength parallel to the grain at 12 % moisture content (USDA Wood Handbook), not a graded design value; its 540 kg/m³ is the specific gravity 0.48 at 12 % moisture content from the same source × 1.12 for the water × 1000 kg/m³ ≈ 538, rounded.
-- **Density** (`density`, kg/m³) is used only for self-weight. `validDensity(v)`: a finite number, 0 or more; anything else, and `null`, means not set, and a member of that material then has no self-weight. A custom material starts without a density: an invented value would give a wrong self-weight with no warning. 0 is a deliberate value (a weightless material), not a missing one.
+- Material presets: steel E 200 GPa, σy 250 MPa, ρ 7850 kg/m³; 6061-T6 aluminium 68.9 GPa, 276 MPa, 2700 kg/m³; Douglas fir 11 GPa, 49.9 MPa, 540 kg/m³; custom 100 GPa, 200 MPa, no density. Douglas fir's 49.9 MPa is the clear-wood compressive strength parallel to the grain at 12 % moisture content (USDA Wood Handbook), not a graded design value. Its 540 kg/m³ is an approximate representative value at 12 % moisture content, and is labelled so wherever the preset is offered or explained (the preset list, the fir note `FIR_NOTE`, Help, README): coast Douglas-fir has a specific gravity of 0.48 at 12 % moisture content (USDA Forest Products Laboratory, *Wood Handbook*, 2021, Table 5–3b), and 1000 kg/m³ × 0.48 × 1.12 = 537.6 kg/m³, rounded to 540 (maintainer decision, milestone 4).
+- **Density** (`density`, kg/m³) is used only for self-weight. `validDensity(v)`: a finite number, 0 or more; anything else, and `null`, means not set, and a member of that material then has no self-weight. A custom material starts without a density: an invented value would give a wrong self-weight with no warning. 0 is a deliberate value (a weightless material), not a missing one. A missing density is never filled in from the preset, not even when E and fy still equal the preset's exactly (maintainer decision, milestone 4; see §5).
 - Section shapes (`sectionProps`): `custom` (A and I entered directly), `rod {d}`, `chs {D, t}` (2t ≤ D), `rect {b, h}`, `rhs {b, h, t}` (2t < min(b, h)). Dimensions are in metres. A and the minimum (weak-axis) I are computed from the dimensions, assuming sharp corners.
 
 ## 2. Supports
@@ -100,7 +100,7 @@ The page shows a one-time notice when a version 1 model, report or session with 
 - unknown fields are ignored, for forward compatibility. Names are trimmed and cut to 80 characters; an empty name becomes "Load case N".
 
 **Densities and the self-weight case** (milestone 4):
-- A missing or `null` density means not set, without a note: files written before milestone 4 have none, and the preset is not used to fill it in, because the material may have been changed since it was created. Every version 1 file therefore reads without densities.
+- A missing or `null` density means not set, without a note: files written before milestone 4 have none, and the preset is never used to fill it in, even when E and fy still equal the preset's exactly, because the material may have been changed since it was created (maintainer decision, milestone 4). Every version 1 file, and every version 2 file or session written before milestone 4, therefore reads without densities; a self-weight case then warns (§6) and is marked incomplete (`analysis-math.md` §6).
 - A density that is a number, or a string holding one, of 0 or more is kept; anything else (negative, not finite, text, `true`, an object) is not set, with a note.
 - A case with `"generated": "self-weight"` is read as the generated case; loads or settlements stored with it are not applied (they would be stale), with a note. A case with any other `generated` value is read as an ordinary case with its entries, with a note that this version cannot generate it.
 
@@ -118,7 +118,7 @@ Checks the solver does not make, returned as `{ msg, ref }` and shown in the hea
 - "Node N: the custom support has neither x′ nor y′ fixed, so it provides no restraint."
 - "Node N: the settlement along y′ in "Load case 1" has no effect, because y′ is not fixed." (x′, y′, or both)
 - "Node N is not connected to any member, so its settlement in "…" has no effect."
-- Only when the model has a self-weight case: "Material "…" has no density, so its N members carry no weight in "Self-weight"." (one per material, in material order)
+- Only when the model has a self-weight case: "Material "…" has no density, so its N members carry no weight in "Self-weight"." (one per material, in material order). The case is then also marked incomplete wherever it is presented (`selfWeightSummary`, `analysis-math.md` §6).
 
 ## 7. Saved sessions in browser storage
 
@@ -139,7 +139,14 @@ Smoke mode uses `SMOKE_SESSION_KEYS` (`trusslab.smoke-test.session.v2`, `.v1`, `
 
 ## 8. Rules for a future version 3
 
-Milestone 4 extended version 2 without a version bump, on purpose: `density` and `generated` are optional, a file without them reads exactly as before, and a version 2 reader that does not know them (milestone 3) loses only those additions, never structural data or entered loads: it reads the self-weight case as an empty ordinary case and the materials without density. Bumping the version would have made every new file unreadable for that reader and required a new session key. Add further fields the same way only when the same holds; otherwise bump the version as below.
+**Decision (maintainer, milestone 4, final):** keep version 2 and add optional fields; no version 3 and no new session key. `density` and `generated` are optional, and a file without them reads exactly as before. Bumping the version would have made every new file unreadable for the milestone 3 reader and required a new session key and a session migration.
+
+**The accepted downgrade limitation**, documented for users in the README ("Opening newer files in an older TrussLab"):
+- A milestone 3 build (Rev 5) reads a milestone 4 file or session without any note and drops what it does not know: the materials have no density, and the self-weight case becomes an empty ordinary case named "Self-weight". Structural data and entered loads and settlements are kept.
+- If that build saves, the file no longer has the densities or the `generated` flag. Reading it again in milestone 4 gives materials without density and an ordinary empty "Self-weight" case.
+- Every build from milestone 3 on uses the same session key, `trusslab.session.v2`, so opening a milestone 3 build in the same browser rewrites the autosaved session in that form at its first save.
+
+Add further fields the same way only when the same holds (an older reader loses only the additions, never structural data or entered actions); otherwise bump the version as below.
 
 - Keep reading versions 1 and 2, and all three wrappers, with a migration test for each.
 - Never delete the only recoverable copy of a user's session: write and verify the new key before removing an old one.

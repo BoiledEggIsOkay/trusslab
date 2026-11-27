@@ -39,6 +39,10 @@ const out = typeof console !== 'undefined' && console.log ? console.log.bind(con
 - Name a check by what it proves ("member 1 carries -62.5 kN (closed form)"), not by how it is computed.
 - Label a test that records current behaviour, which a later milestone will change on purpose, as "TEMPORARY characterisation test", and name the milestone that replaces it.
 
+### Storage and other browser state in headless tests
+
+Code that touches browser storage takes the storage object as a parameter (`loadStoredSession(storage, keys)`), so a headless test can pass a stand-in. `test/model.test.js` has `fakeStorage`, whose switches make `getItem` or `setItem` (for every key or chosen keys) or `removeItem` throw, or truncate what is written (`corrupt`) or rewrite it into other valid text (`rewrite`) so that the read-back checks fail: use it to prove that no failure path deletes the only recoverable copy of a session.
+
 ### Prove that a test can fail
 
 A test that has never been seen to fail has not been shown to detect anything.
@@ -56,9 +60,11 @@ A test that has never been seen to fail has not been shown to detect anything.
 
 ### How it works
 
-- `script.js` installs `window.TrussLabTest` (version 1) only in smoke mode. Tests observe through it and drive the app with real DOM events. They never use `window.TrussLab`.
+- `script.js` installs `window.TrussLabTest` (version 2) only in smoke mode. Tests observe through it and drive the app with real DOM events. They never use `window.TrussLab`.
 - Isolation:
-  - smoke mode stores its session under its own key, so the user's saved session is never read or written;
+  - smoke mode stores its sessions under its own keys (`T.storageKeys`), so the user's sessions are never read or written; the test compares every key in `T.userStorageKeys` before and after the run;
+  - a scenario that simulates storage failures patches `Storage.prototype.getItem`/`setItem`/`removeItem` for the smoke-test keys only, and restores them in `finally`;
+  - a scenario that loads a stored session with other settings calls `applyTestSettings()` afterwards, so later scenarios keep the test settings;
   - the whole application state is captured before the run and restored in a `finally` block, with pending autosaves cancelled;
   - every scenario has its own try/catch.
 
@@ -78,7 +84,7 @@ A test that has never been seen to fail has not been shown to detect anything.
 - Native pointer capture: `canvas.setPointerCapture` is stubbed during the run and restored afterwards.
 - Default browser actions: a synthetic Enter does not press a button, and a synthetic arrow key does not move a slider.
 - The side-panel button branch that does not match the current window width.
-- Opening files in browsers without `DataTransfer` (reported as SKIP).
+- Opening files in browsers without `DataTransfer`, and the saved-session scenario in browsers that do not expose `Storage` (both reported as SKIP).
 
 ## Reporting results
 

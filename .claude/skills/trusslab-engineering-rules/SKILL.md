@@ -28,7 +28,7 @@ TrussLab teaches from the operations its solver really performs. Every number sh
 
 | Milestone | Rule, in short | Details |
 |---|---|---|
-| 3 Load cases | Every prescribed action (nodal forces and settlements) belongs to a load case; supports keep only restraint geometry. λ scales the whole combined action, settlements included. File format version 2 keeps reading version 1 files, autosaved sessions and report files | `model-format.md` §5, `analysis-math.md` §4 |
+| 3 Load cases (done) | Every prescribed action (nodal forces and settlements) belongs to a load case; supports keep only restraint geometry. λ scales loads and settlements alike; λ = 0 gives zero results only for a stable model. File format version 2 reads version 1 files, reports and sessions | `model-format.md` §3–§7, `analysis-math.md` §4 |
 | 4 Self-weight | Generated dead-load case: W = ρAL·g, half to each end node, gravity −y, recomputed after section changes. No distributed loads | `analysis-math.md` §6 |
 | 5 Combinations | Solve each combination's factored state directly; design checks take the worst governing value | `analysis-math.md` §5, `design-conventions.md` §3 |
 | 10 Sizing | Discrete candidates per section group, sorted by ρA; iterate with a cap, cycle detection and an explicit not-converged result | `design-conventions.md` §4 |
@@ -36,7 +36,7 @@ TrussLab teaches from the operations its solver really performs. Every number sh
 
 ## References: read the one you need
 
-- `references/model-format.md`: the in-memory model, supports, file format version 1, what `deserialize` accepts (model files, autosaved sessions, report files with a nested model), and the compatibility requirements for version 2. Read it before changing the model, the save format, autosave, import or export, and before milestone 3.
+- `references/model-format.md`: the in-memory model, supports, load cases, file format version 2, what `readModel` accepts (model files, autosaved sessions, report files with a nested model; version 1 migration; malformed content), model warnings, and saved-session storage and recovery. Read it before changing the model, load cases, the save format, autosave, import or export.
 - `references/analysis-math.md`: the input and output of `FEA.analyze()`, the Direct Stiffness Method pipeline and its formulas, tolerances, λ and settlements, solving combinations, and self-weight lumping. Read it before writing anything that builds solver input or reads solver results.
 - `references/design-conventions.md`: member checks, safety factors and status, target safety factor, material limit stresses, worst-case results over combinations, section sizing, deflection, and how to present results to learners. Read it before design checks, sizing, or any Inspector, lesson or help text.
 

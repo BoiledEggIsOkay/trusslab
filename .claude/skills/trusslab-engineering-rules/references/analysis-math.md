@@ -29,7 +29,7 @@ Output (main fields):
 3. **Element.** L = hypot(Δx, Δy), c = Δx/L, s = Δy/L, k = EA/L; `[kᵉ] = k[c² cs −c² −cs; cs s² −cs −s²; −c² −cs c² cs; −cs −s² cs s²]`.
 4. **Assembly.** The 2n × 2n `[K]` is assembled with compensated summation, and is checked to be exactly symmetric.
 5. **Rotated support frames.** K′ = Λ K Λᵀ, F′ = Λ F.
-6. **Partition.** K_ff u_f = F_f − K_fs u_s, where u_s holds the prescribed displacements.
+6. **Partition.** K_ff u_f = F_f − K_fs u_s, where u_s holds the prescribed displacements. `FEA.analyze()` receives F and u_s already multiplied by λ (§4).
 7. **Stability, before solving.** Find zero-stiffness DOFs, scale the matrix to a unit diagonal (Jacobi equilibration), then run a pivoted Cholesky. A rank deficiency means a mechanism: no solution, and the mode shapes are returned.
 8. **Solve.** LU with partial pivoting, then up to 6 steps of iterative refinement using double-word (Dot2) residuals. The determinant is computed in log form and compared between LU and Cholesky. κ₁ is exact up to 200 free DOFs and estimated (Hager/Higham) above that.
 9. **Recovery.**
@@ -53,13 +53,17 @@ Output (main fields):
 
 ## 4. λ and settlements
 
-**Current behaviour (until milestone 3).** `TrussModel.toAnalysisInput` (called by `buildInput` in `script.js`) sends `fx·λ`, `fy·λ`, and the support's `dx`/`dy` unscaled. The λ tooltip says so, and `test/model.test.js` records it in a temporary characterisation test. Therefore u(λ) = λ·u_loads + u_settlement, and the same holds for N and R.
+Since milestone 3, `TrussModel.toAnalysisInput(model, { loadFactor: λ, loadCase })` (called by `buildInput` in `script.js`) builds the input from one load case, the active one by default:
+- `fx = λ·F_x`, `fy = λ·F_y` for every nodal load, along global x, y;
+- `dx = λ·δ_x′` on a fixed x′ axis and `dy = λ·δ_y′` on a fixed y′ axis, along the support frame rotated by `angle`; 0 on an axis that is not fixed;
+- `fixX`, `fixY`, `angle` from the support (`supportRestraint`).
 
-**Agreed for milestone 3.**
-- Every prescribed action belongs to a load case: nodal forces and settlements alike. Supports keep only type, frame angle and fixed axes.
-- λ scales the complete combined action. Then u(λ) = λ·u(1), N(λ) = λ·N(1), R(λ) = λ·R(1), and λ = 0 gives exactly zero displacements and forces.
-- Remove the old behaviour. Update the λ tooltip, the help text and the README. Replace the temporary characterisation test with tests that λ scales both loads and settlements, including the λ = 0 case.
-- A settlement on an axis that is not restrained has no effect in the solver: warn about it instead of dropping it silently.
+So the partition reads K_ff u_f = λF_f − K_fs(λu_s), and the reactions R = K u − λF, with u = λu_s at the restrained DOFs. Because the system is linear, u(λ) = λ·u(1), N(λ) = λ·N(1), R(λ) = λ·R(1), and safety factors scale as SF(λ) = SF(1)/λ.
+
+- **λ = 0** is the zero-action state: for a stable model every displacement, member force and reaction is exactly zero. Stability does not depend on the actions, so a mechanism stays unstable at any λ, λ = 0 included, and no numbers are shown for it.
+- **A settlement on an axis that is not fixed** has no effect in the solver. It is kept in the model, and `validateModel` warns about it rather than dropping it silently; the same for a settlement on a node that no member connects.
+- **Tests.** `test/model.test.js` ("Load factor λ scales nodal loads and settlements alike") checks λ = 0.5, 2.5 and 0 against λ·(the λ = 1 result) and the mechanism at λ = 0. The nine examples are checked at λ = 1 against `test/fixtures/examples-baseline.js`, which is unchanged from milestone 2: at λ = 1 the old and new rules give identical solver input.
+- **Version 1 models.** Before milestone 3, λ scaled loads but not settlements. A version 1 model with a settlement therefore gives different results at λ ≠ 1; the page tells the user once (see `model-format.md` §5).
 
 ## 5. Solving load combinations (milestone 5)
 

@@ -69,12 +69,13 @@ Put new page code in the matching section. The sections call each other in both 
 ## Test interfaces
 
 - `window.TrussLab` = `{ state, solve, buildExample, loadModel, serialize, deserialize, parseExpr, sectionProps }`. It hands out live internal state. Keep it working with the same members for compatibility, but do not write new code or tests against it.
-- `window.TrussLabTest` (version 1) exists only with `?smoke`. Its queries return plain copies; `capture`/`restore`/`diff` provide isolation. Additive changes keep version 1. A breaking change bumps the version and updates `test/browser-smoke.js` in the same commit.
+- `window.TrussLabTest` (version 2 since milestone 3) exists only with `?smoke`. Its queries return plain copies (`model()` is file format version 2); `capture`/`restore`/`diff` provide isolation. It also exposes `storageKey`, `storageKeys` (the smoke-test keys), `userStorageKey`, `userStorageKeys` (every key that may hold the user's work, which the test checks are unchanged), `reloadStoredSession()` (runs start-up's session handling again, on the smoke-test keys) and `saveNow()`. Additive changes keep the version. A breaking change bumps it and updates `test/browser-smoke.js` in the same commit.
 
 ## Save files and autosave
 
-The full description is in `../trusslab-engineering-rules/references/model-format.md`: the in-memory model, file format version 1, what `deserialize` accepts, and the compatibility requirements for version 2. In short:
+The full description is in `../trusslab-engineering-rules/references/model-format.md`: the in-memory model, load cases, file format version 2, what `readModel` accepts, and saved-session storage. In short:
 
-- `deserialize` reads three kinds of input: model files, autosaved sessions, and exported report files that nest the model under `model`. Keep all three working.
-- Autosave: `scheduleSave()` waits 400 ms, then writes `{ model, settings, view }` to `localStorage` under `trusslab.session.v1`. Only the keys of `DEFAULT_SETTINGS` are stored. In smoke mode the key is `trusslab.smoke-test.session`.
-- A format change bumps the version and must keep reading version 1 model files, autosaved sessions and report files, with a migration test for each.
+- `readModel` (and `deserialize`, which returns only the model) reads three kinds of input: model files, autosaved sessions, and exported report files that nest the model under `model`, in format version 2 or 1. Keep all of them working. It returns `notes` for anything skipped; the page shows them as "Import notes".
+- Storage logic is DOM-free in `model.js` (`loadStoredSession`, `saveStoredSession`, `backupUnreadable`), with the storage object passed in. `script.js` passes a guarded `localStorage` (`STORE`) and the keys (`SESSION_KEYS`, or `SMOKE_SESSION_KEYS` in smoke mode); no other code touches `localStorage`.
+- Autosave: `scheduleSave()` waits 400 ms, then `saveNow()` writes `{ model, settings, view, importNotes }` under `trusslab.session.v2` and reads it back. A read that fails at start-up blocks all writes until a reload. Only the keys of `DEFAULT_SETTINGS` are stored. A version 1 session is migrated at start-up and its key removed only after a verified write; an unreadable version 2 session is backed up first. Failures show a persistent note in the status bar (`#sbSave`).
+- A format change bumps the version and must keep reading every earlier version's model files, autosaved sessions and report files, with a migration test for each.

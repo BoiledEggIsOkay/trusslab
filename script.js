@@ -26,12 +26,16 @@
   const SANS = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
   const dpr = () => window.devicePixelRatio || 1;
   const cosSinDeg = FEA.util.cosSinDeg;
-  // The model layer lives in model.js (global TrussModel, no DOM): units, the expression parser,
-  // materials, sections, model objects, supports, serialisation, the examples and the solver input.
+  // The model layer lives in model.js (global TrussModel, no DOM): units, the expression parser, materials,
+  // sections, model objects, supports, load cases, the file format, model checks, the examples, the solver
+  // input and saved sessions.
   const {
     GPA, MPA, MM, MM2, MM4, D2R, parseExpr, evalNum,
     FIR_NOTE, GROUP_COLORS, SHAPES, sectionProps, makeMaterial, makeGroup, makeNode, makeMember, emptyModel,
-    SUPPORT_TYPES, SUPPORT_SHORT, setSupport, supportDOF, serialize, deserialize, EXAMPLES, buildExample, toAnalysisInput,
+    SUPPORT_TYPES, SUPPORT_SHORT, setSupport, supportRestraint, serialize, readModel, deserialize, validateModel,
+    EXAMPLES, buildExample, toAnalysisInput,
+    addLoadCase, removeLoadCase, setActiveLoadCase, removeNodeActions, nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement,
+    SESSION_KEYS, SMOKE_SESSION_KEYS, loadStoredSession, saveStoredSession,
   } = TrussModel;
 
   const FORCE_UNITS = { N: 1, kN: 1e3, MN: 1e6 };
@@ -69,18 +73,25 @@
   /* =====================================================================
    * 2. Materials, sections, model objects
    * ===================================================================== */
-  // Material presets, section shapes, model constructors, supports and serialize / deserialize are in
+  // Material presets, section shapes, model constructors, supports, load cases and the file format are in
   // model.js. supportText stays here because it formats numbers for display.
-  function supportText(s) {
-    if (s.type === 'inclined') return `Incl. roller ${fmt(s.angle, 4)}°`;
+  /** Short support label. `st` is the node's settlement in the active load case: δ marks a fixed axis that settles. */
+  function supportText(s, st) {
+    const d = st || { dx: 0, dy: 0 };
+    const settles = (s.fixX && d.dx !== 0) || (s.fixY && d.dy !== 0);
+    if (s.type === 'inclined') return `Incl. roller ${fmt(s.angle, 4)}°${settles ? ' δ' : ''}`;
     if (s.type === 'custom') {
+      if (!s.fixX && !s.fixY) return 'Custom, restrains nothing';
       const parts = [];
-      if (s.fixX) parts.push(`x′${s.dx ? ' δ' : ''}`);
-      if (s.fixY) parts.push(`y′${s.dy ? ' δ' : ''}`);
-      return `Custom ${parts.join(',') || 'free'}${s.angle ? ` @${fmt(s.angle, 3)}°` : ''}`;
+      if (s.fixX) parts.push(`x′${d.dx ? ' δ' : ''}`);
+      if (s.fixY) parts.push(`y′${d.dy ? ' δ' : ''}`);
+      return `Custom ${parts.join(',')}${s.angle ? ` @${fmt(s.angle, 3)}°` : ''}`;
     }
-    return SUPPORT_SHORT[s.type] || 'Free';
+    return `${SUPPORT_SHORT[s.type] || 'Free'}${settles ? ' δ' : ''}`;
   }
+  const nodeSupportText = (n) => supportText(n.support, nodeSettlement(state.model, n));
+  /** Model-check warnings (validateModel) that concern one node. */
+  const nodeWarnings = (n) => { const i = state.model.nodes.indexOf(n); return validateModel(state.model).filter((w) => w.ref && w.ref.index === i); };
 
   /* =====================================================================
    * 3. Example structures
@@ -100,6 +111,7 @@
     liveSolve: true, chain: true,
     bottomTab: 'members', bottomCollapsed: false, bottomHeight: 250,
     mtxView: 'global', mtxUnit: 'kN/m', mtxMode: 'table', mtxDimZeros: true,
+    lambdaNoticeDismissed: false,
   };
   const state = {
     model: null,
@@ -117,12 +129,16 @@
     supTool: { type: 'pin', angle: 30 },
     loadTool: { fx: 0, fy: -10e3, mode: 'set' },
     sort: { members: { key: 'id', dir: 1 }, nodes: { key: 'id', dir: 1 } },
+    importNotes: [], // notes from reading the current model (readModel), shown in the health report
     lastP: null, W: 0, H: 0,
   };
   function S() { return state.s; }
 
   const history = { undo: [], redo: [], max: 200 };
-  const snapshot = () => JSON.stringify(serialize(state.model));
+  // An undo snapshot is the model in file format version 2, the session ids of its load cases, and its import notes.
+  // The ids let undo and redo keep the load case you are looking at: switching cases is not an edit and is never
+  // undone. The notes describe the file the model came from, so undoing an Open… brings back the earlier model's notes.
+  const snapshot = () => JSON.stringify({ model: serialize(state.model), caseUids: state.model.loadCases.map((c) => c.uid), importNotes: state.importNotes });
   function pushUndo(snap) {
     history.undo.push(snap || snapshot());
     if (history.undo.length > history.max) history.undo.shift();
@@ -132,7 +148,15 @@
   function restoreSnapshot(str) {
     const gi = state.model.groups.indexOf(state.activeGroup);
     const ei = state.model.groups.indexOf(state.editGroup);
-    state.model = deserialize(JSON.parse(str));
+    const activeUid = state.model.activeCase.uid;
+    const obj = JSON.parse(str);
+    const model = readModel(obj).model;
+    if (Array.isArray(obj.caseUids) && obj.caseUids.length === model.loadCases.length) model.loadCases.forEach((c, i) => { c.uid = obj.caseUids[i]; });
+    // keep the active case if it still exists; otherwise the snapshot's active case, which always does
+    const keep = model.loadCases.find((c) => c.uid === activeUid);
+    if (keep) model.activeCase = keep;
+    state.model = model;
+    state.importNotes = Array.isArray(obj.importNotes) ? obj.importNotes : [];
     state.activeGroup = state.model.groups[gi] || state.model.groups[0];
     state.editGroup = ei >= 0 ? state.model.groups[ei] || null : null;
     state.memberStart = null;
@@ -156,37 +180,92 @@
     $('#btnRedo').disabled = !history.redo.length;
   }
 
-  /** index.html?smoke runs the browser smoke test (test/browser-smoke.js). Smoke mode keeps its
-   *  session under a separate key, so the user's saved session is never read or written. */
+  /** index.html?smoke runs the browser smoke test (test/browser-smoke.js). Smoke mode keeps its sessions
+   *  under separate keys, so the user's saved sessions are never read or written. */
   const SMOKE = /^\?(?:.*&)?smoke(?:[=&]|$)/.test(location.search);
-  const USER_STORE_KEY = 'trusslab.session.v1';
-  const STORE_KEY = SMOKE ? 'trusslab.smoke-test.session' : USER_STORE_KEY;
+  const KEYS = SMOKE ? SMOKE_SESSION_KEYS : SESSION_KEYS;
+  /** Browser storage, or null where the browser refuses access to it (some file:// and private-window setups). */
+  const STORE = (() => { try { const s = window.localStorage; s.getItem(KEYS.v2); return s; } catch (e) { return null; } })();
+  /** migrationPending: a version 1 session was loaded and its key is removed after the first verified save.
+   *  corruptV2: an unreadable version 2 session that could not be backed up yet, so it must not be overwritten.
+   *  readFailed: keys whose read threw at start-up; until a reload nothing is written, since a session may be there. */
+  const storageStatus = { migrationPending: false, corruptV2: null, readFailed: [] };
   let saveTimer = 0; // 0 = no autosave pending
+  function sessionToSave() {
+    const keep = {};
+    for (const k of Object.keys(DEFAULT_SETTINGS)) keep[k] = state.s[k];
+    return { model: state.model, settings: keep, view: state.view, importNotes: state.importNotes };
+  }
+  /** Saves the session now (verified; see saveStoredSession) and shows or clears the status-bar note. */
+  function saveNow() {
+    clearTimeout(saveTimer);
+    saveTimer = 0;
+    let res;
+    try { res = saveStoredSession(STORE, KEYS, sessionToSave(), storageStatus); }
+    catch (e) { res = { saved: false, stage: 'write', error: e.message || String(e) }; }
+    showSaveStatus(res);
+    return res;
+  }
   function scheduleSave() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      saveTimer = 0;
-      try {
-        const keep = {};
-        for (const k of Object.keys(DEFAULT_SETTINGS)) keep[k] = state.s[k];
-        localStorage.setItem(STORE_KEY, JSON.stringify({ model: serialize(state.model), settings: keep, view: state.view }));
-      } catch (e) { /* storage unavailable or full: ignore */ }
-    }, 400);
+    saveTimer = setTimeout(saveNow, 400);
   }
+  /** Status bar: a persistent note while the session cannot be saved, and a different, informational one when the
+   *  session was saved but only the cleanup of the old version 1 session failed. Cleared by the next save that
+   *  succeeds completely. The tooltip gives the reason. */
+  const SAVE_FAILED = {
+    read: 'The saved session could not be read when TrussLab started, so nothing is written until you reload the page.',
+    backup: 'An unreadable earlier session must be backed up before it can be replaced.',
+    write: 'The browser did not store this session.',
+    verify: 'The saved session could not be verified: it must read back unchanged and restore the same model.',
+  };
+  function showSaveStatus(res) {
+    const el = $('#sbSave');
+    let text = '', cls = '', detail = '';
+    if (!res.saved) {
+      cls = 'bad';
+      text = 'Changes not saved — browser storage unavailable';
+      detail = SAVE_FAILED[res.stage] || SAVE_FAILED.write;
+    } else if (res.legacy === 'failed') {
+      cls = 'info';
+      text = detail = 'Saved. The old version 1 session could not be removed yet; it will be retried';
+    }
+    el.hidden = !text;
+    el.textContent = text;
+    el.className = `save-status ${cls}`;
+    el.title = text ? `${detail}${res.error ? ` (${res.error})` : ''}` : '';
+  }
+  /** Reads the saved session, migrating version 1 in memory, and applies its settings, view and import notes.
+   *  Returns { restored, source: 'v2' | 'v1' | 'none', hasSettlement, backup, readFailed }. */
   function loadSession() {
-    try {
-      const raw = localStorage.getItem(STORE_KEY);
-      if (!raw) return false;
-      const obj = JSON.parse(raw);
-      const model = deserialize(obj.model);
-      if (obj.settings) for (const k of Object.keys(DEFAULT_SETTINGS)) if (obj.settings[k] !== undefined && typeof obj.settings[k] === typeof DEFAULT_SETTINGS[k]) state.s[k] = obj.settings[k];
-      if (!FORCE_UNITS[state.s.forceUnit]) state.s.forceUnit = 'kN';
-      if (!DISP_UNITS[state.s.dispUnit]) state.s.dispUnit = 'mm';
-      if (obj.view && Number.isFinite(obj.view.zoom) && obj.view.zoom > 0) state.view = { cx: +obj.view.cx || 0, cy: +obj.view.cy || 0, zoom: obj.view.zoom };
-      state.model = model;
-      return true;
-    } catch (e) { return false; }
+    const res = loadStoredSession(STORE, KEYS);
+    storageStatus.migrationPending = res.migrationPending;
+    storageStatus.corruptV2 = res.corruptV2;
+    storageStatus.readFailed = res.readFailed || [];
+    const readFailed = storageStatus.readFailed.length > 0;
+    if (!res.model) return { restored: false, source: res.source, backup: res.backup, readFailed };
+    if (res.settings) for (const k of Object.keys(DEFAULT_SETTINGS)) if (res.settings[k] !== undefined && typeof res.settings[k] === typeof DEFAULT_SETTINGS[k]) state.s[k] = res.settings[k];
+    if (!FORCE_UNITS[state.s.forceUnit]) state.s.forceUnit = 'kN';
+    if (!DISP_UNITS[state.s.dispUnit]) state.s.dispUnit = 'mm';
+    if (res.view && Number.isFinite(res.view.zoom) && res.view.zoom > 0) state.view = { cx: +res.view.cx || 0, cy: +res.view.cy || 0, zoom: res.view.zoom };
+    state.model = res.model;
+    state.importNotes = res.notes || [];
+    return { restored: true, source: res.source, hasSettlement: modelHasSettlement(res.model), backup: res.backup, readFailed };
   }
+  /** After a session is loaded: a migrated version 1 session is saved at once (verified, and only then is the old
+   *  key removed), and the λ notice appears if it holds a settlement. Returns a short message for the toast. */
+  function afterSessionLoaded(session) {
+    if (session.source === 'v1') saveNow();
+    if (session.source === 'v1' && session.hasSettlement) showLambdaNotice();
+    if (session.readFailed) saveNow(); // refused at once, so the status bar says so from the start
+    const parts = [];
+    if (session.restored) parts.push(session.source === 'v1' ? 'Previous session restored and converted to file format version 2' : 'Previous session restored. Use New or Examples to start over');
+    if (session.backup && session.backup.ok) parts.push('an unreadable saved session was kept as a backup in browser storage');
+    if (session.readFailed) parts.push('your saved session could not be read from browser storage, so changes are not saved until you reload the page');
+    return parts.join('; ');
+  }
+  /** The update notice about λ: shown once, until dismissed. */
+  function showLambdaNotice() { if (!state.s.lambdaNoticeDismissed) $('#updateNotice').hidden = false; }
 
   /* =====================================================================
    * 5. Analysis driver
@@ -609,7 +688,8 @@
     p = T(-w - 5, base); ctx.moveTo(p[0], p[1]); p = T(w + 5, base); ctx.lineTo(p[0], p[1]);
     for (let lx = -w - 3; lx <= w + 5; lx += 4.5) { const a = T(lx, base), b = T(lx - 4, base - 5); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
     ctx.stroke();
-    if (s.type === 'custom' && (s.dx || s.dy)) {
+    const st = nodeSettlement(state.model, n); // the active load case's settlement, on a fixed axis
+    if ((s.fixX && st.dx !== 0) || (s.fixY && st.dy !== 0)) {
       ctx.fillStyle = COL.custom; ctx.font = `bold 11px ${SANS}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
       const q = T(w + 8, -h / 2);
       ctx.fillText('δ', q[0], q[1]);
@@ -617,17 +697,17 @@
     ctx.restore();
   }
   function drawLoads(P) {
-    const lf = state.s.loadFactor;
+    const lf = state.s.loadFactor, M = state.model;
     let fmax = 0;
-    for (const n of state.model.nodes) fmax = Math.max(fmax, Math.hypot(n.load.fx, n.load.fy));
+    for (const n of M.nodes) { const L = nodeLoad(M, n); fmax = Math.max(fmax, Math.hypot(L.fx, L.fy)); }
     if (!(fmax > 0)) return;
     ctx.save();
     ctx.strokeStyle = COL.load; ctx.fillStyle = COL.load; ctx.lineWidth = 2;
     ctx.font = `11px ${MONO}`;
-    for (const n of state.model.nodes) {
-      const fx = n.load.fx * lf, fy = n.load.fy * lf, F = Math.hypot(fx, fy);
+    for (const n of M.nodes) {
+      const L = nodeLoad(M, n), fx = L.fx * lf, fy = L.fy * lf, F = Math.hypot(fx, fy);
       if (!(F > 0)) continue;
-      const len = 26 + 34 * Math.hypot(n.load.fx, n.load.fy) / fmax;
+      const len = 26 + 34 * Math.hypot(L.fx, L.fy) / fmax;
       const ux = fx / F, uy = -fy / F;
       const [x, y] = P.get(n);
       const hx = x - ux * 7, hy = y - uy * 7, tx = hx - ux * len, ty = hy - uy * len;
@@ -745,6 +825,7 @@
     const r = info.r;
     const lines = [];
     if (info.mode === 'deformed') lines.push(`<b>Deflection ×${fmt(state.s.scale, 4)}</b> · dashed = undeformed`);
+    if (state.model.loadCases.length > 1) lines.push(`Load case: <b>${esc(state.model.activeCase.name)}</b>`);
     if (state.s.loadFactor !== 1) lines.push(`<b>Load factor λ = ${fmt(state.s.loadFactor, 4)}</b>`);
     if (r && r.ok) lines.push(`δmax ${fD(r.summary.maxDisp.value)} ${state.s.dispUnit} · SFmin ${fmt(r.summary.minSF.value, 3)}`);
     const html = lines.join('<br>');
@@ -819,6 +900,7 @@
     pushUndo();
     const nCount = ns.size;
     const before = state.model.members.length;
+    removeNodeActions(state.model, [...ns]); // their loads and settlements, in every load case
     state.model.members = state.model.members.filter((e) => !ms.has(e) && !ns.has(e.n1) && !ns.has(e.n2));
     state.model.nodes = state.model.nodes.filter((n) => !ns.has(n));
     if (state.memberStart && state.memberStart.node && ns.has(state.memberStart.node)) state.memberStart = null;
@@ -942,10 +1024,10 @@
     const n = pickNode(sx, sy, 10);
     if (!n) return;
     pushUndo();
-    const t = state.loadTool;
-    if (t.mode === 'clear') { n.load.fx = 0; n.load.fy = 0; }
-    else if (t.mode === 'add') { n.load.fx += t.fx; n.load.fy += t.fy; }
-    else { n.load.fx = t.fx; n.load.fy = t.fy; }
+    const t = state.loadTool, cur = nodeLoad(state.model, n); // the active load case
+    if (t.mode === 'clear') setNodeLoad(state.model, n, 0, 0);
+    else if (t.mode === 'add') setNodeLoad(state.model, n, cur.fx + t.fx, cur.fy + t.fy);
+    else setNodeLoad(state.model, n, t.fx, t.fy);
     selectOnly('node', n);
     modelChanged();
   }
@@ -1159,8 +1241,10 @@
     if (hit.kind === 'node') {
       const n = hit.obj, nr = r && r.ok ? nodeRes(r, n) : null;
       h = `<div class="tt-h">Node ${nodeNo(n)}<small>(${fmt(n.x, 6)}, ${fmt(n.y, 6)}) m</small></div><table>`;
-      h += row('Support', esc(supportText(n.support)));
-      if (n.load.fx || n.load.fy) h += row('Load (×λ)', `${fF(n.load.fx * state.s.loadFactor)}, ${fF(n.load.fy * state.s.loadFactor)} ${fu}`);
+      h += row('Support', esc(nodeSupportText(n)));
+      const L = nodeLoad(state.model, n), st = nodeSettlement(state.model, n), lf = state.s.loadFactor;
+      if (L.fx || L.fy) h += row('Load (×λ)', `${fF(L.fx * lf)}, ${fF(L.fy * lf)} ${fu}`);
+      if (st.dx || st.dy) h += row('Settlement (×λ)', `${fD(st.dx * lf)}, ${fD(st.dy * lf)} ${du} along x′, y′`);
       if (nr) {
         const ref = r.summary.maxDisp.value;
         h += row('u<sub>x</sub>', `${fD(nr.ux, ref)} ${du}`, 'sep') + row('u<sub>y</sub>', `${fD(nr.uy, ref)} ${du}`) + row('|u|', `${fD(nr.u, ref)} ${du}`);
@@ -1211,7 +1295,51 @@
   /* =====================================================================
    * 10. Left panel: materials, section groups, settings
    * ===================================================================== */
-  function renderLeftLists() { renderMaterials(); renderGroups(); renderGroupEditor(); if (state.tool === 'member') renderToolOptions(); }
+  function renderLeftLists() { renderMaterials(); renderGroups(); renderGroupEditor(); renderLoadCases(); if (state.tool === 'member') renderToolOptions(); }
+
+  /** Load-case controls (Analysis section): the active case, its name, and adding or deleting cases. */
+  function renderLoadCases() {
+    const m = state.model, sel = $('#selLoadCase'), name = $('#txtCaseName');
+    sel.innerHTML = m.loadCases.map((c, i) => `<option value="${i}">${esc(c.name)}</option>`).join('');
+    sel.value = String(m.loadCases.indexOf(m.activeCase));
+    if (document.activeElement !== name) name.value = m.activeCase.name;
+    $('#btnDeleteCase').disabled = m.loadCases.length <= 1;
+  }
+  function bindLoadCases() {
+    $('#selLoadCase').addEventListener('change', (e) => {
+      const lc = state.model.loadCases[+e.target.value];
+      if (!lc || lc === state.model.activeCase) return;
+      setActiveLoadCase(state.model, lc); // choosing what to look at is not an edit: no undo step
+      renderLoadCases();
+      modelChanged();
+    });
+    $('#btnAddCase').addEventListener('click', () => {
+      pushUndo();
+      setActiveLoadCase(state.model, addLoadCase(state.model));
+      renderLoadCases();
+      modelChanged();
+      toast(`Added “${state.model.activeCase.name}”. Loads and settlements you apply now go into it`, 'ok');
+    });
+    const name = $('#txtCaseName');
+    name.addEventListener('change', () => {
+      const v = name.value.trim().slice(0, 80);
+      if (!v || v === state.model.activeCase.name) { name.value = state.model.activeCase.name; return; }
+      pushUndo();
+      state.model.activeCase.name = v;
+      renderLoadCases();
+      modelChanged();
+    });
+    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') name.blur(); });
+    $('#btnDeleteCase').addEventListener('click', () => {
+      if (state.model.loadCases.length <= 1) return;
+      pushUndo();
+      const gone = state.model.activeCase.name;
+      removeLoadCase(state.model, state.model.activeCase);
+      renderLoadCases();
+      modelChanged();
+      toast(`Deleted “${gone}” (Ctrl+Z undoes it)`);
+    });
+  }
 
   function renderMaterials() {
     const box = $('#materialsList');
@@ -1221,7 +1349,7 @@
       <div class="mat-card" data-mi="${i}">
         <div class="mat-top">
           <input type="color" data-mf="color" value="${esc(m.color)}" title="Display colour">
-          <input class="txt" data-mf="name" value="${esc(m.name)}" title="Material name">
+          <input class="txt" data-mf="name" value="${esc(m.name)}" title="Material name" maxlength="80">
           <button class="icon-btn" data-mf="del" title="${used.get(m) ? 'Used by section groups' : 'Delete material'}">&#10005;</button>
         </div>
         <div class="mat-props">
@@ -1245,7 +1373,7 @@
           return;
         }
         el.addEventListener('change', () => {
-          if (f === 'name') { pushUndo(); m.name = el.value.trim() || 'Material'; modelChanged({ materials: true, groups: true }); return; }
+          if (f === 'name') { pushUndo(); m.name = el.value.trim().slice(0, 80) || 'Material'; modelChanged({ materials: true, groups: true }); return; }
           if (f === 'color') { m.color = el.value; scheduleSave(); return; }
           const v = evalNum(el.value);
           if (!(v > 0)) { el.classList.add('invalid'); toast(`${f === 'E' ? 'E' : 'σy'} must be a positive number`, 'bad'); return; }
@@ -1292,7 +1420,7 @@
     box.innerHTML = `
       <div class="grp-editor">
         <div class="form-grid">
-          <label>Name</label><div class="inline"><input class="txt" data-gf="name" value="${esc(g.name)}"><input type="color" data-gf="color" value="${esc(g.color)}"></div>
+          <label>Name</label><div class="inline"><input class="txt" data-gf="name" value="${esc(g.name)}" maxlength="80"><input type="color" data-gf="color" value="${esc(g.color)}"></div>
           <label>Material</label><select class="select" data-gf="material">${state.model.materials.map((m, i) => `<option value="${i}" ${m === g.material ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
           <label>Shape</label><select class="select" data-gf="shape">${Object.entries(SHAPES).map(([k, s]) => `<option value="${k}" ${k === sh ? 'selected' : ''}>${s.label}</option>`).join('')}</select>
           ${dims}
@@ -1333,7 +1461,7 @@
         return;
       }
       el.addEventListener('change', () => {
-        if (f === 'name') { pushUndo(); g.name = el.value.trim() || 'Section'; modelChanged({ groups: true }); return; }
+        if (f === 'name') { pushUndo(); g.name = el.value.trim().slice(0, 80) || 'Section'; modelChanged({ groups: true }); return; }
         if (f === 'color') { g.color = el.value; renderGroups(); scheduleSave(); return; }
         if (f === 'material') { pushUndo(); g.material = state.model.materials[+el.value]; modelChanged({ groups: true }); return; }
         if (f === 'shape') {
@@ -1410,6 +1538,8 @@
       state.editGroup = g;
       modelChanged({ groups: true });
     });
+    bindLoadCases();
+    $('#btnDismissNotice').addEventListener('click', () => { state.s.lambdaNoticeDismissed = true; $('#updateNotice').hidden = true; scheduleSave(); });
     $$('#segGrid button').forEach((b) => b.addEventListener('click', () => { state.s.grid = +b.dataset.grid; syncSettingsUI(); scheduleSave(); requestRender(); }));
     $('#chkSnap').addEventListener('change', (e) => { state.s.snap = e.target.checked; syncSettingsUI(); scheduleSave(); });
     $('#chkSnapNodes').addEventListener('change', (e) => { state.s.snapNodes = e.target.checked; scheduleSave(); });
@@ -1460,27 +1590,34 @@
   }
   function nodeForm(n) {
     const s = n.support, fu = state.s.forceUnit, du = state.s.dispUnit;
-    const F = Math.hypot(n.load.fx, n.load.fy), ang = F > 0 ? Math.atan2(n.load.fy, n.load.fx) / D2R : 0;
+    const L = nodeLoad(state.model, n), st = nodeSettlement(state.model, n), caseName = esc(state.model.activeCase.name);
+    const F = Math.hypot(L.fx, L.fy), ang = F > 0 ? Math.atan2(L.fy, L.fx) / D2R : 0;
     let sup = `<label>Type</label><select class="select" data-f="stype">${SUPPORT_TYPES.map(([k, l]) => `<option value="${k}" ${k === s.type ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
     if (s.type === 'inclined') sup += `<label>Surface α</label><div class="inline">${numIn('sangle', s.angle, 'title="Angle of the rolling surface from +x, degrees CCW"')}<span class="u">°</span></div>`;
     if (s.type === 'custom') {
       sup += `<label>Frame α</label><div class="inline">${numIn('sangle', s.angle, 'title="Rotation of the x′, y′ support frame from global x, degrees CCW"')}<span class="u">°</span></div>
-        <label class="chk"><input type="checkbox" data-f="sfixx" ${s.fixX ? 'checked' : ''}> Fix x′, δ</label><div class="inline">${numIn('sdx', (s.dx || 0) / dU(), s.fixX ? '' : 'disabled')}<span class="u">${du}</span></div>
-        <label class="chk"><input type="checkbox" data-f="sfixy" ${s.fixY ? 'checked' : ''}> Fix y′, δ</label><div class="inline">${numIn('sdy', (s.dy || 0) / dU(), s.fixY ? '' : 'disabled')}<span class="u">${du}</span></div>`;
+        <label class="chk"><input type="checkbox" data-f="sfixx" ${s.fixX ? 'checked' : ''}> Fix x′</label><span></span>
+        <label class="chk"><input type="checkbox" data-f="sfixy" ${s.fixY ? 'checked' : ''}> Fix y′</label><span></span>`;
     }
+    // A settlement field for every fixed axis, and for a free axis that still holds a settlement (it has no effect,
+    // and the field lets you clear it). Settlements belong to the active load case and are scaled by λ.
+    const axes = [['sdx', 'x′', s.fixX, st.dx], ['sdy', 'y′', s.fixY, st.dy]].filter(([, , fixed, v]) => fixed || v !== 0);
+    const settle = axes.length ? `<div class="sub-h">Settlement in “${caseName}” (before λ)</div><div class="form-grid">${axes.map(([f, ax, fixed, v]) =>
+      `<label>δ along ${ax}</label><div class="inline">${numIn(f, v / dU(), fixed ? 'title="Prescribed displacement along this support axis"' : 'title="This axis is not fixed, so this settlement has no effect"')}<span class="u">${du}</span></div>`).join('')}</div>` : '';
+    const warn = nodeWarnings(n).map((w) => `<p class="note warn-note">${esc(w.msg)}</p>`).join('');
     return `
-      <div class="ins-title"><h4>Node N${nodeNo(n)}<small>${esc(supportText(s))}</small></h4><button class="btn sm danger" data-act="del">Delete</button></div>
+      <div class="ins-title"><h4>Node N${nodeNo(n)}<small>${esc(nodeSupportText(n))}</small></h4><button class="btn sm danger" data-act="del">Delete</button></div>
       <div class="sub-h">Coordinates</div>
       <div class="form-grid">
         <label>X</label><div class="inline">${numIn('x', n.x, 'title="Expressions allowed, e.g. 2.5*sqrt(3)"')}<span class="u">m</span></div>
         <label>Y</label><div class="inline">${numIn('y', n.y, 'title="Expressions allowed, e.g. 2.5*sqrt(3)"')}<span class="u">m</span></div>
       </div>
       <div class="sub-h">Support / boundary condition</div>
-      <div class="form-grid">${sup}</div>
-      <div class="sub-h">Nodal load (before λ)</div>
+      <div class="form-grid">${sup}</div>${warn}${settle}
+      <div class="sub-h">Nodal load in “${caseName}” (before λ)</div>
       <div class="form-grid">
-        <label>F<sub>x</sub></label><div class="inline">${numIn('fx', n.load.fx / fU())}<span class="u">${fu}</span></div>
-        <label>F<sub>y</sub></label><div class="inline">${numIn('fy', n.load.fy / fU())}<span class="u">${fu}</span></div>
+        <label>F<sub>x</sub></label><div class="inline">${numIn('fx', L.fx / fU())}<span class="u">${fu}</span></div>
+        <label>F<sub>y</sub></label><div class="inline">${numIn('fy', L.fy / fU())}<span class="u">${fu}</span></div>
         <label>|F|</label><div class="inline">${numIn('fmag', F / fU())}<span class="u">${fu}</span></div>
         <label>Direction</label><div class="inline">${numIn('fang', ang, 'title="Degrees CCW from +x (−90 = downward)"')}<span class="u">°</span></div>
       </div>
@@ -1505,6 +1642,7 @@
         <div class="form-grid">
           <label>Support</label><div class="inline"><select class="select" data-m="stype">${SUPPORT_TYPES.filter(([k]) => k !== 'custom').map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
           <label>Angle α</label><div class="inline"><input class="num" data-m="sangle" value="30"><span class="u">°</span><button class="btn sm" data-act="mm-support">Apply</button></div>
+          <label>Load case</label><div class="inline"><span class="dim">${esc(state.model.activeCase.name)}</span></div>
           <label>F<sub>x</sub></label><div class="inline"><input class="num" data-m="fx" value="0"><span class="u">${fu}</span></div>
           <label>F<sub>y</sub></label><div class="inline"><input class="num" data-m="fy" value="${inVal(-10e3 / fU())}"><span class="u">${fu}</span><button class="btn sm" data-act="mm-load">Apply</button></div>
         </div>`;
@@ -1518,20 +1656,21 @@
   function summaryView() {
     const M = state.model, r = R();
     const nSup = M.nodes.filter((n) => n.support.type !== 'none').length;
-    const nLoad = M.nodes.filter((n) => n.load.fx || n.load.fy).length;
+    const nLoad = M.nodes.filter((n) => { const L = nodeLoad(M, n); return L.fx || L.fy; }).length;
     let det = '';
     if (r && r.determinacy) {
       const d = r.determinacy;
       det = `<dt>Maxwell m + r − 2j</dt><dd>${d.m} + ${d.r} − 2·${d.j} = ${d.degree}</dd>`;
     }
     return `
-      <div class="form-grid" style="grid-template-columns:auto 1fr;margin-bottom:8px"><label>Title</label><input class="txt" data-f="title" value="${esc(M.title)}"></div>
+      <div class="form-grid" style="grid-template-columns:auto 1fr;margin-bottom:8px"><label>Title</label><input class="txt" data-f="title" value="${esc(M.title)}" maxlength="120"></div>
       <dl class="kv">
         <dt>Nodes / joints</dt><dd>${M.nodes.length}</dd>
         <dt>Members</dt><dd>${M.members.length}</dd>
         <dt>Global DOFs</dt><dd>${2 * M.nodes.length}</dd>
         <dt>Supported nodes</dt><dd>${nSup}</dd>
-        <dt>Loaded nodes</dt><dd>${nLoad}</dd>
+        <dt>Load cases</dt><dd>${M.loadCases.length}, active: ${esc(M.activeCase.name)}</dd>
+        <dt>Loaded nodes</dt><dd>${nLoad} <small>in the active case</small></dd>
         ${det}
       </dl>
       <div class="tip"><ul>
@@ -1555,8 +1694,8 @@
   }
   function onInspectorField(el, ns, ms) {
     const f = el.dataset.f, n = ns[0], e = ms[0];
-    if (f === 'title') { pushUndo(); state.model.title = el.value.trim() || 'Untitled truss'; scheduleSave(); return; }
-    if (f === 'stype') { pushUndo(); setSupport(n, el.value, n.support.angle || 30); modelChanged(); return; }
+    if (f === 'title') { pushUndo(); state.model.title = el.value.trim().slice(0, 120) || 'Untitled truss'; scheduleSave(); return; } // the file reader's limits
+    if (f === 'stype') { pushUndo(); setSupport(n, el.value); modelChanged(); return; } // keeps the frame angle, 0° included
     if (f === 'sfixx' || f === 'sfixy') { pushUndo(); n.support[f === 'sfixx' ? 'fixX' : 'fixY'] = el.checked; modelChanged(); return; }
     if (f === 'grp') { pushUndo(); e.group = state.model.groups[+el.value]; modelChanged({ groups: true }); return; }
     const v = readNum(el);
@@ -1574,15 +1713,24 @@
       case 'x': n.x = v; break;
       case 'y': n.y = v; break;
       case 'sangle': n.support.angle = v; break;
-      case 'sdx': n.support.dx = v * dU(); break;
-      case 'sdy': n.support.dy = v * dU(); break;
-      case 'fx': n.load.fx = v * fU(); break;
-      case 'fy': n.load.fy = v * fU(); break;
+      case 'sdx': case 'sdy': {
+        // settlements belong to the active load case; the form is rebuilt below, since δ marks and warnings may change
+        const st = nodeSettlement(state.model, n);
+        if (f === 'sdx') setNodeSettlement(state.model, n, v * dU(), st.dy); else setNodeSettlement(state.model, n, st.dx, v * dU());
+        modelChanged();
+        return;
+      }
+      case 'fx': case 'fy': {
+        const L = nodeLoad(state.model, n);
+        if (f === 'fx') setNodeLoad(state.model, n, v * fU(), L.fy); else setNodeLoad(state.model, n, L.fx, v * fU());
+        break;
+      }
       case 'fmag': case 'fang': {
-        const F = Math.hypot(n.load.fx, n.load.fy), a0 = F > 0 ? Math.atan2(n.load.fy, n.load.fx) / D2R : -90;
+        const L = nodeLoad(state.model, n);
+        const F = Math.hypot(L.fx, L.fy), a0 = F > 0 ? Math.atan2(L.fy, L.fx) / D2R : -90;
         const mag = f === 'fmag' ? v * fU() : F, ang = f === 'fang' ? v : a0;
         const [c, s] = cosSinDeg(ang);
-        n.load.fx = mag * c; n.load.fy = mag * s;
+        setNodeLoad(state.model, n, mag * c, mag * s);
         break;
       }
       default: return;
@@ -1600,7 +1748,7 @@
       toast(`Support applied to ${plural(ns.length, 'node')}`, 'ok'); modelChanged();
     } else if (act === 'mm-load') {
       const fx = readNum(q('fx')), fy = readNum(q('fy')); if (fx === null || fy === null) return;
-      pushUndo(); ns.forEach((n) => { n.load.fx = fx * fU(); n.load.fy = fy * fU(); });
+      pushUndo(); ns.forEach((n) => setNodeLoad(state.model, n, fx * fU(), fy * fU()));
       toast(`Load applied to ${plural(ns.length, 'node')}`, 'ok'); modelChanged();
     } else if (act === 'mm-group') {
       pushUndo(); const g = state.model.groups[+q('grp').value]; ms.forEach((e) => { e.group = g; });
@@ -1612,8 +1760,8 @@
     const box = $('#inspector');
     const n = state.sel.nodes.size === 1 && !state.sel.members.size ? [...state.sel.nodes][0] : null;
     if (!n) return;
-    const F = Math.hypot(n.load.fx, n.load.fy);
-    const vals = { x: n.x, y: n.y, fx: n.load.fx / fU(), fy: n.load.fy / fU(), fmag: F / fU(), fang: F > 0 ? Math.atan2(n.load.fy, n.load.fx) / D2R : 0 };
+    const L = nodeLoad(state.model, n), st = nodeSettlement(state.model, n), F = Math.hypot(L.fx, L.fy);
+    const vals = { x: n.x, y: n.y, fx: L.fx / fU(), fy: L.fy / fU(), fmag: F / fU(), fang: F > 0 ? Math.atan2(L.fy, L.fx) / D2R : 0, sdx: st.dx / dU(), sdy: st.dy / dU() };
     for (const [k, v] of Object.entries(vals)) { const el = box.querySelector(`[data-f="${k}"]`); if (el && el !== document.activeElement) { el.value = inVal(v); el.classList.remove('invalid'); } }
   }
   function renderInspectorResults() {
@@ -1780,7 +1928,11 @@
       }
       h += stabilityBlock(r);
       if (r.errors.length) h += `<div class="sub-h">Errors</div><ul class="msg-list">${msgs(r.errors.filter((m) => !r.mechanism || !/kinematically unstable/.test(m.msg)), 'e')}</ul>`;
-      if (r.warnings.length) h += `<div class="sub-h">Warnings</div><ul class="msg-list">${msgs(r.warnings, 'w')}</ul>`;
+      { // model checks (validateModel) first, then the solver's warnings, then notes from reading the current file
+        const warns = validateModel(state.model).concat(r.warnings);
+        if (warns.length) h += `<div class="sub-h">Warnings</div><ul class="msg-list">${msgs(warns, 'w')}</ul>`;
+        if (state.importNotes.length) h += `<div class="sub-h">Import notes</div><ul class="msg-list">${msgs(state.importNotes, 'w')}</ul>`;
+      }
       box.innerHTML = h;
       bindHealth(box);
       return;
@@ -1816,7 +1968,11 @@
       }).join('')}</ul>`;
     }
     h += stabilityBlock(r);
-    if (r.warnings.length) h += `<div class="sub-h">Warnings</div><ul class="msg-list">${msgs(r.warnings, 'w')}</ul>`;
+    { // model checks (validateModel) first, then the solver's warnings, then notes from reading the current file
+      const warns = validateModel(state.model).concat(r.warnings);
+      if (warns.length) h += `<div class="sub-h">Warnings</div><ul class="msg-list">${msgs(warns, 'w')}</ul>`;
+      if (state.importNotes.length) h += `<div class="sub-h">Import notes</div><ul class="msg-list">${msgs(state.importNotes, 'w')}</ul>`;
+    }
     box.innerHTML = h;
     bindHealth(box);
   }
@@ -1952,8 +2108,8 @@
     const key = (row, k) => {
       const n = row.n, nr = row.nr;
       switch (k) {
-        case 'x': return n.x; case 'y': return n.y; case 'sup': return supportText(n.support);
-        case 'fx': return n.load.fx; case 'fy': return n.load.fy;
+        case 'x': return n.x; case 'y': return n.y; case 'sup': return nodeSupportText(n);
+        case 'fx': return nodeLoad(M, n).fx; case 'fy': return nodeLoad(M, n).fy;
         case 'ux': return nr ? nr.ux : 0; case 'uy': return nr ? nr.uy : 0; case 'u': return nr ? nr.u : 0;
         case 'rx': return nr ? nr.rx : 0; case 'ry': return nr ? nr.ry : 0;
         default: return row.i;
@@ -1964,10 +2120,10 @@
     const cols = [['id', '#', 'l'], ['x', 'x [m]'], ['y', 'y [m]'], ['sup', 'Support', 'l'], ['fx', `F<sub>x</sub>·λ [${fu}]`], ['fy', `F<sub>y</sub>·λ [${fu}]`], ['ux', `u<sub>x</sub> [${du}]`], ['uy', `u<sub>y</sub> [${du}]`], ['u', `|u| [${du}]`], ['rx', `R<sub>x</sub> [${fu}]`], ['ry', `R<sub>y</sub> [${fu}]`]];
     let h = `<table class="data">${header(cols, state.sort.nodes)}<tbody>`;
     for (const { n, i, nr } of sorted) {
-      const sup = nr && (nr.restrained[0] || nr.restrained[1]);
+      const sup = nr && (nr.restrained[0] || nr.restrained[1]), L = nodeLoad(M, n);
       h += `<tr data-i="${i}" class="${state.sel.nodes.has(n) ? 'sel' : ''}">
-        <td class="l">N${i + 1}</td><td>${fmt(n.x, 6)}</td><td>${fmt(n.y, 6)}</td><td class="l">${esc(supportText(n.support))}</td>
-        <td>${n.load.fx ? fF(n.load.fx * lf) : '<span class="dim">0</span>'}</td><td>${n.load.fy ? fF(n.load.fy * lf) : '<span class="dim">0</span>'}</td>
+        <td class="l">N${i + 1}</td><td>${fmt(n.x, 6)}</td><td>${fmt(n.y, 6)}</td><td class="l">${esc(nodeSupportText(n))}</td>
+        <td>${L.fx ? fF(L.fx * lf) : '<span class="dim">0</span>'}</td><td>${L.fy ? fF(L.fy * lf) : '<span class="dim">0</span>'}</td>
         <td>${nr ? fD(nr.ux, dref) : '—'}</td><td>${nr ? fD(nr.uy, dref) : '—'}</td><td>${nr ? fD(nr.u, dref) : '—'}</td>
         <td>${sup ? fF(nr.rx, fref) : '<span class="dim">—</span>'}</td><td>${sup ? fF(nr.ry, fref) : '<span class="dim">—</span>'}</td></tr>`;
     }
@@ -2001,7 +2157,7 @@
       const vec = [];
       if (r.bf) vec.push({ name: `F<sub>eff</sub> [${state.s.forceUnit}]`, vals: r.bf, unit: fU() });
       if (r.ok && r.ut) vec.push({ name: `u<sub>f</sub> [${state.s.dispUnit}]`, vals: Array.from(r.free, (d) => r.ut[d]), unit: dU() });
-      return { M: r.Kff, n: nf, labels: lab, fixed: () => false, vec, title: `Reduced stiffness matrix [K<sub>ff</sub>] (free DOFs): [K<sub>ff</sub>]{u<sub>f</sub>} = {F<sub>f</sub>} − [K<sub>fs</sub>]{u<sub>s</sub>}`, legend: 'F<sub>eff</sub> includes the effect of prescribed displacements. DOFs marked ′ are in a rotated support frame.' };
+      return { M: r.Kff, n: nf, labels: lab, fixed: () => false, vec, title: `Reduced stiffness matrix [K<sub>ff</sub>] (free DOFs): [K<sub>ff</sub>]{u<sub>f</sub>} = λ{F<sub>f</sub>} − [K<sub>fs</sub>](λ{u<sub>s</sub>})`, legend: 'F<sub>eff</sub> = λF<sub>f</sub> − K<sub>fs</sub>(λu<sub>s</sub>) includes the effect of prescribed displacements. DOFs marked ′ are in a rotated support frame.' };
     }
     const e = [...state.sel.members][0];
     const i = e && r.memberIndex ? r.memberIndex.get(e) : undefined;
@@ -2110,11 +2266,14 @@
   function reportObject(r) {
     const M = state.model;
     const D = r.diagnostics || {};
+    // the actions exactly as analysed: the active load case, every load and settlement multiplied by λ
+    const inp = toAnalysisInput(M, { loadFactor: r.loadFactor });
     const obj = {
-      meta: { app: 'TrussLab 2D Truss FEA & Load Simulator', solver: FEA.VERSION, generated: new Date().toISOString(), units: 'SI base units: m, N, Pa, m^2, m^4; angles in degrees', loadFactor: r.loadFactor, targetSF: state.s.targetSF },
+      meta: { app: 'TrussLab 2D Truss FEA & Load Simulator', solver: FEA.VERSION, generated: new Date().toISOString(), units: 'SI base units: m, N, Pa, m^2, m^4; angles in degrees',
+        loadCase: { id: M.loadCases.indexOf(M.activeCase) + 1, name: M.activeCase.name }, loadFactor: r.loadFactor, loadFactorScales: 'nodal loads and prescribed settlements', targetSF: state.s.targetSF },
       model: serialize(M),
       status: r.ok ? 'solved' : r.mechanism ? 'unstable' : 'invalid',
-      errors: r.errors.map((e) => e.msg), warnings: r.warnings.map((w) => w.msg),
+      errors: r.errors.map((e) => e.msg), warnings: validateModel(M).map((w) => w.msg).concat(r.warnings.map((w) => w.msg)),
       determinacy: r.determinacy || null,
       diagnostics: {
         freeDOFs: D.nf, restrainedDOFs: D.ns, rank: D.rank, nullity: D.nullity, minScaledPivot: jnum(D.minPivot),
@@ -2138,7 +2297,8 @@
       };
       obj.nodes = M.nodes.map((n, i) => {
         const nr = r.nodes[i];
-        return { id: i + 1, x: n.x, y: n.y, support: supportText(n.support), Fx: n.load.fx * r.loadFactor, Fy: n.load.fy * r.loadFactor, ux: nr.ux, uy: nr.uy, u: nr.u, Rx: nr.rx, Ry: nr.ry };
+        const a = inp.nodes[i];
+        return { id: i + 1, x: n.x, y: n.y, support: nodeSupportText(n), Fx: a.fx, Fy: a.fy, prescribedDx: a.dx, prescribedDy: a.dy, ux: nr.ux, uy: nr.uy, u: nr.u, Rx: nr.rx, Ry: nr.ry };
       });
       obj.members = M.members.map((e, k) => {
         const mr = r.members[k];
@@ -2164,7 +2324,8 @@
     L.push(csvRow(['# units', o.meta.units]));
     L.push(csvRow(['title', state.model.title]));
     L.push(csvRow(['status', o.status]));
-    L.push(csvRow(['load factor', r.loadFactor]));
+    L.push(csvRow(['load case', o.meta.loadCase.name]));
+    L.push(csvRow(['load factor', r.loadFactor, 'scales nodal loads and prescribed settlements']));
     L.push(csvRow(['target SF', state.s.targetSF]));
     o.errors.forEach((e) => L.push(csvRow(['error', e])));
     o.warnings.forEach((w) => L.push(csvRow(['warning', w])));
@@ -2175,9 +2336,10 @@
     state.model.groups.forEach((g, i) => L.push(csvRow([i + 1, g.name, g.material.name, g.shape.type, g.A, g.I])));
     L.push(''); L.push('NODES');
     L.push(csvRow(['id', 'x_m', 'y_m', 'support', 'fix_x', 'fix_y', 'frame_angle_deg', 'prescribed_dx_m', 'prescribed_dy_m', 'Fx_N', 'Fy_N', 'ux_m', 'uy_m', 'u_m', 'Rx_N', 'Ry_N']));
+    const inp = toAnalysisInput(state.model, { loadFactor: r.loadFactor }); // the actions as analysed (×λ)
     state.model.nodes.forEach((n, i) => {
-      const s = supportDOF(n.support), nr = r.ok ? r.nodes[i] : null;
-      L.push(csvRow([i + 1, n.x, n.y, supportText(n.support), s.fixX ? 1 : 0, s.fixY ? 1 : 0, s.angle, s.dx, s.dy, n.load.fx * r.loadFactor, n.load.fy * r.loadFactor,
+      const s = supportRestraint(n.support), a = inp.nodes[i], nr = r.ok ? r.nodes[i] : null;
+      L.push(csvRow([i + 1, n.x, n.y, nodeSupportText(n), s.fixX ? 1 : 0, s.fixY ? 1 : 0, s.angle, a.dx, a.dy, a.fx, a.fy,
         nr ? nr.ux : '', nr ? nr.uy : '', nr ? nr.u : '', nr ? nr.rx : '', nr ? nr.ry : '']));
     });
     L.push(''); L.push('MEMBERS');
@@ -2220,7 +2382,7 @@
     if (!r.K) { toast('Matrices are not available: ' + firstMsg(r), 'bad'); return; }
     const freeL = Array.from(r.free, (d) => r.dofLabels[d]);
     const o = {
-      meta: { generated: new Date().toISOString(), units: 'K in N/m, F and R in N, u in m', loadFactor: r.loadFactor, note: 'DOF labels: node number + axis; a prime marks a rotated support frame' },
+      meta: { generated: new Date().toISOString(), units: 'K in N/m, F and R in N, u in m', loadCase: state.model.activeCase.name, loadFactor: r.loadFactor, note: 'DOF labels: node number + axis; a prime marks a rotated support frame' },
       dofLabels: r.dofLabels, K: matrixToRows(r.K, r.ndof),
       Krotated: r.rotated.length ? matrixToRows(r.Kt, r.ndof) : null,
       freeDOFs: freeL, restrainedDOFs: Array.from(r.fixed, (d) => r.dofLabels[d]),
@@ -2239,7 +2401,7 @@
       for (let a = 0; a < n; a++) L.push(csvRow([labels[a], ...Array.from(M.subarray(a * n, a * n + n))]));
       L.push('');
     };
-    L.push(csvRow(['# TrussLab system matrices', new Date().toISOString(), 'K in N/m; F, R in N; u in m', `load factor ${r.loadFactor}`]));
+    L.push(csvRow(['# TrussLab system matrices', new Date().toISOString(), 'K in N/m; F, R in N; u in m', `load case ${state.model.activeCase.name}`, `load factor ${r.loadFactor}`]));
     L.push('');
     block('GLOBAL STIFFNESS MATRIX K [N/m]', r.K, r.ndof, r.dofLabels);
     if (r.rotated.length) block("ROTATED GLOBAL MATRIX K' = L K L^T [N/m]", r.Kt, r.ndof, r.dofLabels);
@@ -2308,8 +2470,9 @@
     $('#selMtxUnit').addEventListener('change', (e) => { state.s.mtxUnit = e.target.value; renderMatrix(); renderInspectorResults(); scheduleSave(); });
     $('#chkHideZeros').addEventListener('change', (e) => { state.s.mtxDimZeros = e.target.checked; renderMatrix(); scheduleSave(); });
   }
-  function loadModel(model, msg) {
+  function loadModel(model, msg, notes) {
     state.model = model;
+    state.importNotes = notes || [];
     state.activeGroup = model.groups[0] || null;
     state.editGroup = null;
     state.memberStart = null;
@@ -2346,9 +2509,13 @@
       const rd = new FileReader();
       rd.onload = () => {
         try {
-          const m = deserialize(JSON.parse(String(rd.result)));
+          const res = readModel(JSON.parse(String(rd.result)));
           pushUndo();
-          loadModel(m, `Opened “${f.name}”`);
+          const how = res.fromVersion === 1 ? ', converted from file format version 1' : '';
+          const notes = res.notes.length ? `. ${plural(res.notes.length, 'import note')} in the health report` : '';
+          loadModel(res.model, `Opened “${f.name}”${how}${notes}`, res.notes);
+          // a version 1 model with a settlement behaves differently now that λ scales settlements
+          if (res.fromVersion === 1 && modelHasSettlement(res.model)) showLambdaNotice();
         } catch (err) { toast(`Could not open ${f.name}: ${err.message}`, 'bad'); }
       };
       rd.readAsText(f);
@@ -2386,9 +2553,16 @@
   /* =====================================================================
    * 16. Start-up
    * ===================================================================== */
+  /** Smoke mode starts every run from the default example: remove the smoke-test keys (never the user's). */
+  function clearSmokeKeys() {
+    if (!STORE) return;
+    const keys = [KEYS.v2, KEYS.v1, 'trusslab.smoke-test.session']; // the last is milestone 1's key
+    for (let n = 1; n <= 20; n++) keys.push(n === 1 ? KEYS.backup : `${KEYS.backup}.${n}`);
+    for (const k of keys) { try { STORE.removeItem(k); } catch (e) { /* storage unavailable */ } }
+  }
   function init() {
-    if (SMOKE) { try { localStorage.removeItem(STORE_KEY); } catch (e) { /* storage unavailable */ } } // every smoke run starts from the default example
-    const restored = loadSession();
+    if (SMOKE) clearSmokeKeys();
+    const session = loadSession(), restored = session.restored;
     if (!restored) state.model = buildExample('pratt');
     state.activeGroup = state.model.groups[0] || null;
     bindTopBar();
@@ -2407,7 +2581,8 @@
     renderInspector();
     solve(true);
     refreshHint();
-    if (restored) toast('Previous session restored. Use New or Examples to start over');
+    const message = afterSessionLoaded(session);
+    if (message) toast(message);
     window.addEventListener('blur', () => { state.spaceDown = false; });
   }
 
@@ -2460,6 +2635,10 @@
         helpHidden: $('#helpModal').hidden,
         exportMenuHidden: $('#exportMenu').hidden,
         bottomHeight: document.documentElement.style.getPropertyValue('--bottom-h'),
+        noticeHidden: $('#updateNotice').hidden,
+        saveStatus: canon({ hidden: $('#sbSave').hidden, text: $('#sbSave').textContent, className: $('#sbSave').className, title: $('#sbSave').title }),
+        importNotes: canon(state.importNotes),
+        storageStatus: canon(storageStatus),
       });
     }
     function cancelAutosave() { clearTimeout(saveTimer); saveTimer = 0; }
@@ -2485,6 +2664,11 @@
       $('#helpModal').hidden = snap.helpHidden;
       $('#exportMenu').hidden = snap.exportMenuHidden;
       if (snap.bottomHeight) document.documentElement.style.setProperty('--bottom-h', snap.bottomHeight);
+      $('#updateNotice').hidden = snap.noticeHidden;
+      const sv = JSON.parse(snap.saveStatus);
+      Object.assign($('#sbSave'), { hidden: sv.hidden, textContent: sv.text, className: sv.className, title: sv.title });
+      state.importNotes = JSON.parse(snap.importNotes);
+      Object.assign(storageStatus, JSON.parse(snap.storageStatus));
       setTool(snap.tool);
       renderLeftLists();
       setBottomTab(settings.bottomTab);
@@ -2500,9 +2684,26 @@
       cancelAutosave(); // the calls above schedule autosaves; the restored state must not be re-saved
     }
     return Object.freeze({
-      version: 1,
-      storageKey: STORE_KEY,
-      userStorageKey: USER_STORE_KEY,
+      // version 2: model() returns file format version 2; storage keys are listed per version
+      version: 2,
+      storageKey: KEYS.v2,
+      storageKeys: KEYS,
+      userStorageKey: SESSION_KEYS.v2,
+      /** Every key under which TrussLab may keep a user's session: the test checks they stay unchanged. */
+      userStorageKeys: [SESSION_KEYS.v2, SESSION_KEYS.v1, SESSION_KEYS.backup].concat(Array.from({ length: 19 }, (_, i) => `${SESSION_KEYS.backup}.${i + 2}`)),
+      /** Runs start-up's session handling again, on the smoke-test keys only (this adapter exists only in smoke mode). */
+      reloadStoredSession() {
+        const session = loadSession();
+        if (session.restored) {
+          Object.assign(state, { activeGroup: state.model.groups[0] || null, editGroup: null, memberStart: null, mechMode: 0 });
+          clearSelection(false);
+          syncSettingsUI(); renderLeftLists(); updateZoomLabel(); renderInspector();
+          solve(true);
+        }
+        afterSessionLoaded(session);
+        return { restored: session.restored, source: session.source, hasSettlement: !!session.hasSettlement };
+      },
+      saveNow: () => saveNow(),
       model: () => serialize(state.model),
       results,
       resultsToken: () => (state.res ? tokenOf(state.res) : 0),

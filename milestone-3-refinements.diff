@@ -1,0 +1,329 @@
+diff --git a/.claude/skills/trusslab-engineering-rules/references/analysis-math.md b/.claude/skills/trusslab-engineering-rules/references/analysis-math.md
+index 6ec6e8b..1b24ede 100644
+--- a/.claude/skills/trusslab-engineering-rules/references/analysis-math.md
++++ b/.claude/skills/trusslab-engineering-rules/references/analysis-math.md
+@@ -29,7 +29,7 @@ Output (main fields):
+ 3. **Element.** L = hypot(Δx, Δy), c = Δx/L, s = Δy/L, k = EA/L; `[kᵉ] = k[c² cs −c² −cs; cs s² −cs −s²; −c² −cs c² cs; −cs −s² cs s²]`.
+ 4. **Assembly.** The 2n × 2n `[K]` is assembled with compensated summation, and is checked to be exactly symmetric.
+ 5. **Rotated support frames.** K′ = Λ K Λᵀ, F′ = Λ F.
+-6. **Partition.** K_ff u_f = F_f − K_fs u_s, where u_s holds the prescribed displacements.
++6. **Partition.** K_ff u_f = F_f − K_fs u_s, where u_s holds the prescribed displacements. `FEA.analyze()` receives F and u_s already multiplied by λ (§4).
+ 7. **Stability, before solving.** Find zero-stiffness DOFs, scale the matrix to a unit diagonal (Jacobi equilibration), then run a pivoted Cholesky. A rank deficiency means a mechanism: no solution, and the mode shapes are returned.
+ 8. **Solve.** LU with partial pivoting, then up to 6 steps of iterative refinement using double-word (Dot2) residuals. The determinant is computed in log form and compared between LU and Cholesky. κ₁ is exact up to 200 free DOFs and estimated (Hager/Higham) above that.
+ 9. **Recovery.**
+@@ -58,7 +58,7 @@ Since milestone 3, `TrussModel.toAnalysisInput(model, { loadFactor: λ, loadCase
+ - `dx = λ·δ_x′` on a fixed x′ axis and `dy = λ·δ_y′` on a fixed y′ axis, along the support frame rotated by `angle`; 0 on an axis that is not fixed;
+ - `fixX`, `fixY`, `angle` from the support (`supportRestraint`).
+ 
+-So the partition reads K_ff u_f = λF_f − K_fs (λu_s). Because the system is linear, u(λ) = λ·u(1), N(λ) = λ·N(1), R(λ) = λ·R(1), and safety factors scale as SF(λ) = SF(1)/λ.
++So the partition reads K_ff u_f = λF_f − K_fs(λu_s), and the reactions R = K u − λF, with u = λu_s at the restrained DOFs. Because the system is linear, u(λ) = λ·u(1), N(λ) = λ·N(1), R(λ) = λ·R(1), and safety factors scale as SF(λ) = SF(1)/λ.
+ 
+ - **λ = 0** is the zero-action state: for a stable model every displacement, member force and reaction is exactly zero. Stability does not depend on the actions, so a mechanism stays unstable at any λ, λ = 0 included, and no numbers are shown for it.
+ - **A settlement on an axis that is not fixed** has no effect in the solver. It is kept in the model, and `validateModel` warns about it rather than dropping it silently; the same for a settlement on a node that no member connects.
+diff --git a/.claude/skills/trusslab-engineering-rules/references/model-format.md b/.claude/skills/trusslab-engineering-rules/references/model-format.md
+index 0e7a6a1..90bf768 100644
+--- a/.claude/skills/trusslab-engineering-rules/references/model-format.md
++++ b/.claude/skills/trusslab-engineering-rules/references/model-format.md
+@@ -124,7 +124,7 @@ Smoke mode uses `SMOKE_SESSION_KEYS` (`trusslab.smoke-test.session.v2`, `.v1`, `
+ 
+ - **A failed read is not a missing key.** Every read goes through `readKey`, which returns `{ ok: true, value }` (`null` when the key does not exist) or `{ ok: false, error }`. If a read throws at start-up, the key is listed in `readFailed`, nothing more is loaded (when the version 2 read fails, version 1 is not migrated over a session that may exist), and `saveStoredSession` refuses to write (`stage: 'read'`) until the page is reloaded, so nothing stored can be overwritten or removed. When the version 2 session is readable, the version 1 key is not read at all.
+ - `loadStoredSession(storage, keys)`: a readable version 2 session wins, and a stale version 1 key is then left alone. An unreadable version 2 session is backed up first (`backupUnreadable`: never overwrites a backup holding different data, uses the next number instead, and reads the copy back); if the backup fails, the session is kept in memory as `corruptV2` and nothing overwrites it. Otherwise a readable version 1 session is migrated in memory with its settings and view (`migrationPending`). It deletes nothing.
+-- `saveStoredSession(storage, keys, session, status)`: refuses after a failed read; retries a pending backup; writes the version 2 key and reads it back (a read-back that throws counts as not saved); only then, and only while a migration is pending, removes the version 1 key. It returns `{ saved: false, stage: 'read' | 'backup' | 'write' | 'verify' }` or `{ saved: true, legacy: 'removed' | 'failed' | 'not-needed' }`. The page shows a persistent "Changes not saved — browser storage unavailable" note in the status bar for any failed save (the tooltip gives the reason), and a different, informational note when the session was saved but only the removal of the old version 1 key failed (it is retried on the next save). A successful save clears the note.
++- `saveStoredSession(storage, keys, session, status)`: refuses after a failed read; retries a pending backup; writes the version 2 key and reads it back. The write is verified only if the text reads back exactly as written and rebuilds the same model (`readModel`, then `serialize` again, compared as JSON), since the reader normalises some values (names longer than 80 characters, a title longer than 120, a section area or material property that is not positive); a read-back that throws or fails either comparison counts as not saved (stage `verify`). Only after a verified write, and only while a migration is pending, removes the version 1 key. It returns `{ saved: false, stage: 'read' | 'backup' | 'write' | 'verify' }` or `{ saved: true, legacy: 'removed' | 'failed' | 'not-needed' }`. The page shows a persistent "Changes not saved — browser storage unavailable" note in the status bar for any failed save (the tooltip gives the reason), and a different, informational note when the session was saved but only the removal of the old version 1 key failed (it is retried on the next save). A successful save clears the note.
+ - **Import notes** are session data, not model data: they are saved beside the model as `importNotes` and read back with the session (`cleanNotes` drops duplicates, malformed entries and links to nodes the model does not have; at most 200). A session without `importNotes` loads as before. The page replaces them whenever a new model is loaded (Open…, an example, New), and an undo snapshot carries them, so undoing an Open… brings back the earlier model's notes.
+ 
+ ## 8. Rules for a future version 3
+diff --git a/.claude/skills/trusslab-testing/SKILL.md b/.claude/skills/trusslab-testing/SKILL.md
+index d2f1aa2..0271992 100644
+--- a/.claude/skills/trusslab-testing/SKILL.md
++++ b/.claude/skills/trusslab-testing/SKILL.md
+@@ -41,7 +41,7 @@ const out = typeof console !== 'undefined' && console.log ? console.log.bind(con
+ 
+ ### Storage and other browser state in headless tests
+ 
+-Code that touches browser storage takes the storage object as a parameter (`loadStoredSession(storage, keys)`), so a headless test can pass a stand-in. `test/model.test.js` has `fakeStorage`, whose switches make `getItem` or `setItem` (for every key or chosen keys) or `removeItem` throw, or truncate what is written so that the read-back check fails: use it to prove that no failure path deletes the only recoverable copy of a session.
++Code that touches browser storage takes the storage object as a parameter (`loadStoredSession(storage, keys)`), so a headless test can pass a stand-in. `test/model.test.js` has `fakeStorage`, whose switches make `getItem` or `setItem` (for every key or chosen keys) or `removeItem` throw, or truncate what is written (`corrupt`) or rewrite it into other valid text (`rewrite`) so that the read-back checks fail: use it to prove that no failure path deletes the only recoverable copy of a session.
+ 
+ ### Prove that a test can fail
+ 
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 193cd31..881dacb 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -46,7 +46,7 @@ Saved sessions live in `localStorage` under `trusslab.session.v2`; `trusslab.ses
+ 
+ ## Tests
+ 
+-- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (385 checks, including the nine examples at λ = 1 against the regression baseline in `test/fixtures/examples-baseline.js`).
++- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (393 checks, including the nine examples at λ = 1 against the regression baseline in `test/fixtures/examples-baseline.js`).
+ - Browser smoke test (`test/browser-smoke.js`), in two modes:
+   - `index.html?smoke` runs every scenario against the real page and must end with PASS.
+   - `index.html?smoke=selftest` adds one deliberately failing scenario. It ends with PASS only if exactly that scenario fails and every clean-up check still passes, which shows that a failing test cannot damage the user's work.
+diff --git a/README.md b/README.md
+index 4b6056a..09d85f7 100644
+--- a/README.md
++++ b/README.md
+@@ -47,7 +47,7 @@ The session (model, view, settings) is autosaved in the browser's `localStorage`
+   - version 1 ignored settlements on pins and rollers, so they are not applied now either; each one is listed under "Import notes" in the health report;
+   - if it has a settlement, a one-time notice explains that λ now scales settlements too, so results at λ ≠ 1 differ from version 1. **Got it** dismisses it for good.
+ - Files written by a newer version of TrussLab (format version 3 or later) are refused with a clear message instead of being half-read.
+-- The session is autosaved under `trusslab.session.v2`. A version 1 session (`trusslab.session.v1`) is converted once at start-up, with its settings and view; the old key is removed only after the new session has been written and read back. If an existing version 2 session cannot be read, it is kept unchanged under `trusslab.session.v2.unreadable` (or `.2`, `.3`, … if that name is taken) before anything is written over it.
++- The session is autosaved under `trusslab.session.v2`. A version 1 session (`trusslab.session.v1`) is converted once at start-up, with its settings and view; the old key is removed only after the new session has been written, read back unchanged and found to restore the same model. If an existing version 2 session cannot be read, it is kept unchanged under `trusslab.session.v2.unreadable` (or `.2`, `.3`, … if that name is taken) before anything is written over it.
+ - Import notes are saved with the session, so they are still in the health report after the browser restarts; opening another model, an example or a new model replaces them.
+ - If the browser does not store the session (for example because storage is full or blocked), the status bar says "Changes not saved — browser storage unavailable" until a later save succeeds. If a saved session cannot even be read at start-up, TrussLab starts with an example and writes nothing to browser storage until the page is reloaded, so the stored session is not overwritten.
+ 
+@@ -62,7 +62,7 @@ The session (model, view, settings) is autosaved in the browser's `localStorage`
+ 1. Element matrix in global axes: `[kᵉ] = (EA/L)[c² cs −c² −cs; cs s² −cs −s²; …]`, where `c = Δx/L`, `s = Δy/L` and `L = hypot(Δx, Δy)`. This avoids the trigonometric round-off of computing cos(atan2(…)).
+ 2. Assembly of the 2n × 2n `[K]` with Neumaier-compensated summation. The result is exactly symmetric.
+ 3. Inclined supports: exact rotation of the nodal frames, `K′ = Λ K Λᵀ`, `F′ = Λ F` (no penalty springs).
+-4. Partition: `K_ff u_f = λF_f − K_fs (λu_s)`, where λ multiplies the nodal loads F and the prescribed settlements u_s of the active load case. The system is linear, so `u(λ) = λ·u(1)`, and member forces and reactions scale by λ as well.
++4. Partition: `K_ff u_f = λF_f − K_fs(λu_s)`, where λ multiplies the nodal loads F and the prescribed settlements u_s of the active load case. The system is linear, so `u(λ) = λ·u(1)`, and member forces and reactions scale by λ as well.
+ 5. **Stability verification before solving**:
+    - zero-stiffness DOFs are detected;
+    - Jacobi equilibration `K̃ = D^-½ K_ff D^-½`;
+@@ -74,7 +74,7 @@ The session (model, view, settings) is autosaved in the browser's `localStorage`
+    Mechanisms are reported as rigid-body motion, a zero-stiffness joint, or an internal mechanism, and the mode shape is animated.
+ 6. Solve: LU decomposition with partial pivoting, then iterative refinement whose residuals use error-free transformations (Dot2), at about twice double precision.
+ 7. Results:
+-   - reactions `R = K u − F`;
++   - reactions `R = K u − λF`, where `u` holds `λu_s` at the restrained DOFs;
+    - member forces `F = (EA/L)[(u₂−u₁)c + (v₂−v₁)s]`;
+    - stress `σ = F/A` and strain `ε = ΔL/L`;
+    - Euler load `P_cr = π²EI/L²` with K = 1;
+diff --git a/index.html b/index.html
+index f85871f..1334487 100644
+--- a/index.html
++++ b/index.html
+@@ -324,11 +324,11 @@
+             <div class="eq">[kᵉ] = (EA/L) ·
+               <table class="mat"><tr><td>c²</td><td>cs</td><td>−c²</td><td>−cs</td></tr><tr><td>cs</td><td>s²</td><td>−cs</td><td>−s²</td></tr><tr><td>−c²</td><td>−cs</td><td>c²</td><td>cs</td></tr><tr><td>−cs</td><td>−s²</td><td>cs</td><td>s²</td></tr></table></div></li>
+           <li>The 2n × 2n global [K] is assembled with Neumaier-compensated summation, so it is exactly symmetric.</li>
+-          <li>DOFs are split into free (f) and restrained (s): K<sub>ff</sub> u<sub>f</sub> = F<sub>f</sub> − K<sub>fs</sub> u<sub>s</sub>.</li>
++          <li>DOFs are split into free (f) and restrained (s): K<sub>ff</sub> u<sub>f</sub> = λF<sub>f</sub> − K<sub>fs</sub>(λu<sub>s</sub>), where F<sub>f</sub> holds the nodal loads at the free DOFs, u<sub>s</sub> the prescribed settlements at the restrained DOFs, and λ is the load factor (see <b>Load cases and λ</b> below).</li>
+           <li><b>Stability verification before solving</b>: zero-stiffness DOFs are detected, K<sub>ff</sub> is Jacobi-equilibrated to K̃ = D<sup>−½</sup>K<sub>ff</sub>D<sup>−½</sup>, and a rank-revealing (pivoted) Cholesky factorisation tests positive definiteness. A rank deficiency means a mechanism. The solve is then refused and the mechanism mode shape is animated. The Maxwell count m + r − 2j, the determinant (log form, so it cannot overflow), and the 1-norm condition number κ₁ are reported.</li>
+           <li><b>Solver</b>: LU decomposition with partial pivoting, followed by iterative refinement whose residuals are computed with error-free transformations (Dot2) at about twice double precision.</li>
+           <li><b>Load cases and λ</b>: every action, nodal force or prescribed settlement, belongs to a load case, and the active case is analysed. The load factor λ multiplies all of its actions: {F} → λ{F} and {u<sub>s</sub>} → λ{u<sub>s</sub>}. The model is linear, so u(λ) = λ·u(1), and member forces and reactions scale the same way. At λ = 0 there are no actions: a stable structure has no displacements, member forces or reactions, while a mechanism stays unstable at any λ.</li>
+-          <li>Reactions: {R} = [K]{u} − {F<sub>ext</sub>}. Member force: F = (EA/L)[(u₂ − u₁)c + (v₂ − v₁)s]. σ = F/A, ε = ΔL/L.</li>
++          <li>Reactions: {R} = [K]{u} − λ{F}, where {u} holds λ{u<sub>s</sub>} at the restrained DOFs. Member force: F = (EA/L)[(u₂ − u₁)c + (v₂ − v₁)s]. σ = F/A, ε = ΔL/L.</li>
+           <li>Checks: SF<sub>yield</sub> = σ<sub>y</sub>/|σ|. For compression members SF<sub>buckling</sub> = P<sub>cr</sub>/|F| with P<sub>cr</sub> = π²EI/L². The governing SF is the smaller one. Status is Yielded or Buckled when SF &lt; 1.</li>
+           <li>Verification: global equilibrium ΣF<sub>x</sub>, ΣF<sub>y</sub>, ΣM, and nodal equilibrium rebuilt from the member forces, are reported in the health panel and the solver log.</li>
+         </ol>
+diff --git a/model.js b/model.js
+index 815ba3f..35ee068 100644
+--- a/model.js
++++ b/model.js
+@@ -701,9 +701,10 @@
+   }
+ 
+   /**
+-   * Writes the session { model, settings, view, importNotes } under keys.v2, then reads it back. Only after a verified
+-   * write, and only while a version 1 migration is pending, is keys.v1 removed, so the only recoverable copy is never
+-   * deleted. Import notes are stored beside the model (as `importNotes`, only when there are any), not inside it.
++   * Writes the session { model, settings, view, importNotes } under keys.v2, then reads it back. The write is verified
++   * only if the text reads back exactly as written and rebuilds the same model (read with readModel, serialised again,
++   * compared). Only after a verified write, and only while a version 1 migration is pending, is keys.v1 removed, so the
++   * only recoverable copy is never deleted. Import notes are stored beside the model (as `importNotes`, only when there are any), not inside it.
+    * `status` ({ migrationPending, corruptV2, readFailed }) is updated in place. Returns { saved: false, stage, error }
+    * with stage 'read' (a stored session could not be read at start-up, so nothing is written), 'backup', 'write' or
+    * 'verify', or { saved: true, legacy } with legacy 'removed', 'failed' (the old key could not be removed; retried on
+@@ -726,7 +727,13 @@
+     try { storage.setItem(keys.v2, text); } catch (e) { return { saved: false, stage: 'write', error: errText(e) }; }
+     const back = readKey(storage, keys.v2);
+     if (!back.ok) return { saved: false, stage: 'verify', error: `the saved session could not be read back (${back.error})` };
+-    if (back.value !== text || !parseSession(back.value)) return { saved: false, stage: 'verify', error: 'the saved session did not read back unchanged' };
++    if (back.value !== text) return { saved: false, stage: 'verify', error: 'the saved session did not read back unchanged' };
++    // the text came back unchanged; it must also rebuild the same model, since the reader normalises some values
++    const restored = parseSession(back.value);
++    if (!restored) return { saved: false, stage: 'verify', error: 'the saved session could not be read back as a model' };
++    if (JSON.stringify(serialize(restored.model)) !== JSON.stringify(data.model)) {
++      return { saved: false, stage: 'verify', error: 'the saved session does not read back as the same model' };
++    }
+     if (!status.migrationPending) return { saved: true, legacy: 'not-needed' };
+     try { storage.removeItem(keys.v1); } catch (e) { return { saved: true, legacy: 'failed', error: errText(e) }; }
+     status.migrationPending = false;
+diff --git a/script.js b/script.js
+index 2d05f4b..4ab3282 100644
+--- a/script.js
++++ b/script.js
+@@ -217,7 +217,7 @@
+     read: 'The saved session could not be read when TrussLab started, so nothing is written until you reload the page.',
+     backup: 'An unreadable earlier session must be backed up before it can be replaced.',
+     write: 'The browser did not store this session.',
+-    verify: 'The browser did not store this session unchanged.',
++    verify: 'The saved session could not be verified: it must read back unchanged and restore the same model.',
+   };
+   function showSaveStatus(res) {
+     const el = $('#sbSave');
+@@ -1349,7 +1349,7 @@
+       <div class="mat-card" data-mi="${i}">
+         <div class="mat-top">
+           <input type="color" data-mf="color" value="${esc(m.color)}" title="Display colour">
+-          <input class="txt" data-mf="name" value="${esc(m.name)}" title="Material name">
++          <input class="txt" data-mf="name" value="${esc(m.name)}" title="Material name" maxlength="80">
+           <button class="icon-btn" data-mf="del" title="${used.get(m) ? 'Used by section groups' : 'Delete material'}">&#10005;</button>
+         </div>
+         <div class="mat-props">
+@@ -1373,7 +1373,7 @@
+           return;
+         }
+         el.addEventListener('change', () => {
+-          if (f === 'name') { pushUndo(); m.name = el.value.trim() || 'Material'; modelChanged({ materials: true, groups: true }); return; }
++          if (f === 'name') { pushUndo(); m.name = el.value.trim().slice(0, 80) || 'Material'; modelChanged({ materials: true, groups: true }); return; }
+           if (f === 'color') { m.color = el.value; scheduleSave(); return; }
+           const v = evalNum(el.value);
+           if (!(v > 0)) { el.classList.add('invalid'); toast(`${f === 'E' ? 'E' : 'σy'} must be a positive number`, 'bad'); return; }
+@@ -1420,7 +1420,7 @@
+     box.innerHTML = `
+       <div class="grp-editor">
+         <div class="form-grid">
+-          <label>Name</label><div class="inline"><input class="txt" data-gf="name" value="${esc(g.name)}"><input type="color" data-gf="color" value="${esc(g.color)}"></div>
++          <label>Name</label><div class="inline"><input class="txt" data-gf="name" value="${esc(g.name)}" maxlength="80"><input type="color" data-gf="color" value="${esc(g.color)}"></div>
+           <label>Material</label><select class="select" data-gf="material">${state.model.materials.map((m, i) => `<option value="${i}" ${m === g.material ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
+           <label>Shape</label><select class="select" data-gf="shape">${Object.entries(SHAPES).map(([k, s]) => `<option value="${k}" ${k === sh ? 'selected' : ''}>${s.label}</option>`).join('')}</select>
+           ${dims}
+@@ -1461,7 +1461,7 @@
+         return;
+       }
+       el.addEventListener('change', () => {
+-        if (f === 'name') { pushUndo(); g.name = el.value.trim() || 'Section'; modelChanged({ groups: true }); return; }
++        if (f === 'name') { pushUndo(); g.name = el.value.trim().slice(0, 80) || 'Section'; modelChanged({ groups: true }); return; }
+         if (f === 'color') { g.color = el.value; renderGroups(); scheduleSave(); return; }
+         if (f === 'material') { pushUndo(); g.material = state.model.materials[+el.value]; modelChanged({ groups: true }); return; }
+         if (f === 'shape') {
+@@ -1663,7 +1663,7 @@
+       det = `<dt>Maxwell m + r − 2j</dt><dd>${d.m} + ${d.r} − 2·${d.j} = ${d.degree}</dd>`;
+     }
+     return `
+-      <div class="form-grid" style="grid-template-columns:auto 1fr;margin-bottom:8px"><label>Title</label><input class="txt" data-f="title" value="${esc(M.title)}"></div>
++      <div class="form-grid" style="grid-template-columns:auto 1fr;margin-bottom:8px"><label>Title</label><input class="txt" data-f="title" value="${esc(M.title)}" maxlength="120"></div>
+       <dl class="kv">
+         <dt>Nodes / joints</dt><dd>${M.nodes.length}</dd>
+         <dt>Members</dt><dd>${M.members.length}</dd>
+@@ -1694,7 +1694,7 @@
+   }
+   function onInspectorField(el, ns, ms) {
+     const f = el.dataset.f, n = ns[0], e = ms[0];
+-    if (f === 'title') { pushUndo(); state.model.title = el.value.trim() || 'Untitled truss'; scheduleSave(); return; }
++    if (f === 'title') { pushUndo(); state.model.title = el.value.trim().slice(0, 120) || 'Untitled truss'; scheduleSave(); return; } // the file reader's limits
+     if (f === 'stype') { pushUndo(); setSupport(n, el.value); modelChanged(); return; } // keeps the frame angle, 0° included
+     if (f === 'sfixx' || f === 'sfixy') { pushUndo(); n.support[f === 'sfixx' ? 'fixX' : 'fixY'] = el.checked; modelChanged(); return; }
+     if (f === 'grp') { pushUndo(); e.group = state.model.groups[+el.value]; modelChanged({ groups: true }); return; }
+@@ -2157,7 +2157,7 @@
+       const vec = [];
+       if (r.bf) vec.push({ name: `F<sub>eff</sub> [${state.s.forceUnit}]`, vals: r.bf, unit: fU() });
+       if (r.ok && r.ut) vec.push({ name: `u<sub>f</sub> [${state.s.dispUnit}]`, vals: Array.from(r.free, (d) => r.ut[d]), unit: dU() });
+-      return { M: r.Kff, n: nf, labels: lab, fixed: () => false, vec, title: `Reduced stiffness matrix [K<sub>ff</sub>] (free DOFs): [K<sub>ff</sub>]{u<sub>f</sub>} = {F<sub>f</sub>} − [K<sub>fs</sub>]{u<sub>s</sub>}`, legend: 'F<sub>eff</sub> includes the effect of prescribed displacements. DOFs marked ′ are in a rotated support frame.' };
++      return { M: r.Kff, n: nf, labels: lab, fixed: () => false, vec, title: `Reduced stiffness matrix [K<sub>ff</sub>] (free DOFs): [K<sub>ff</sub>]{u<sub>f</sub>} = λ{F<sub>f</sub>} − [K<sub>fs</sub>](λ{u<sub>s</sub>})`, legend: 'F<sub>eff</sub> = λF<sub>f</sub> − K<sub>fs</sub>(λu<sub>s</sub>) includes the effect of prescribed displacements. DOFs marked ′ are in a rotated support frame.' };
+     }
+     const e = [...state.sel.members][0];
+     const i = e && r.memberIndex ? r.memberIndex.get(e) : undefined;
+diff --git a/test/browser-smoke.js b/test/browser-smoke.js
+index db4d2ab..bf6751f 100644
+--- a/test/browser-smoke.js
++++ b/test/browser-smoke.js
+@@ -678,6 +678,13 @@
+     savedSession = readStorage(T.storageKey);
+     must('a session was saved under the smoke-test key', typeof savedSession === 'string' && savedSession.length > 0);
+     check('the saved model matches the model on screen', JSON.stringify(JSON.parse(savedSession).model) === JSON.stringify(model()));
++    // the page keeps names to the file reader's limits, so the saved session restores exactly the model on screen
++    must('the model title field is shown when nothing is selected', !!el('#inspector [data-f="title"]'));
++    setValue('#inspector [data-f="title"]', 'T'.repeat(130));
++    check('a 130-character title is cut to the 120 characters a file keeps', model().title === 'T'.repeat(120), `${model().title.length} characters`);
++    await sleep(700);
++    check('... and the session still saves and verifies: no "not saved" note, and the stored title is the same',
++      el('#sbSave').hidden && JSON.parse(readStorage(T.storageKey)).model.title === 'T'.repeat(120));
+     check('no user storage key was written', userKeysSnapshot() === userKeysBefore);
+   });
+ 
+diff --git a/test/model.test.js b/test/model.test.js
+index 08e74a1..df83f0b 100644
+--- a/test/model.test.js
++++ b/test/model.test.js
+@@ -223,6 +223,15 @@ testCase('Serialisation (file format version 2)', () => {
+   same('the settlement example: one load case with six loads and the 10 mm settlement along y′ of node 5',
+     [st.loadCases.length, st.loadCases[0].loads.length, st.loadCases[0].settlements], [1, 6, [{ node: 5, dx: 0, dy: -0.01 }]]);
+   check('load entries are in node order', st.loadCases[0].loads.every((e, i, a) => i === 0 || a[i - 1].node < e.node));
++  {
++    // deterministic: the same actions entered in another order are written identically, in node order
++    const a = TM.buildExample('pratt'), b = TM.buildExample('pratt'), lcA = TM.addLoadCase(a, 'X'), lcB = TM.addLoadCase(b, 'X'), order = [6, 3, 9, 2, 7];
++    for (const i of order) { TM.setNodeLoad(a, a.nodes[i], i, -i, lcA); TM.setNodeSettlement(a, a.nodes[i], 0, -i / 1000, lcA); }
++    for (const i of order.slice().reverse()) { TM.setNodeLoad(b, b.nodes[i], i, -i, lcB); TM.setNodeSettlement(b, b.nodes[i], 0, -i / 1000, lcB); }
++    const fa = TM.serialize(a);
++    check('entries are written in node order whatever order they were entered in, so the output is the same',
++      JSON.stringify(fa) === JSON.stringify(TM.serialize(b)) && fa.loadCases[1].loads.map((e) => e.node).join() === '3,4,7,8,10' && fa.loadCases[1].settlements.map((e) => e.node).join() === '3,4,7,8,10');
++  }
+   const z = TM.buildExample('aframe');
+   TM.setNodeLoad(z, z.nodes[0], 0, 0);
+   TM.setNodeSettlement(z, z.nodes[1], 0, 0);
+@@ -519,14 +528,14 @@ testCase('Validation warnings', () => {
+ /** A stand-in for browser storage that can fail on purpose, and records every call. */
+ function fakeStorage(init) {
+   const data = new Map(Object.entries(init || {}));
+-  const log = [], fail = { get: false, getKeys: null, set: false, setKeys: null, remove: false, corrupt: false };
++  const log = [], fail = { get: false, getKeys: null, set: false, setKeys: null, remove: false, corrupt: false, rewrite: null };
+   return {
+     data, log, fail,
+     getItem(k) { log.push(`get ${k}`); if (fail.get && (!fail.getKeys || fail.getKeys.includes(k))) throw new Error('storage is disabled'); return data.has(k) ? data.get(k) : null; },
+     setItem(k, v) {
+       log.push(`set ${k}`);
+       if (fail.set && (!fail.setKeys || fail.setKeys.includes(k))) throw new Error('QuotaExceededError');
+-      data.set(k, fail.corrupt ? String(v).slice(0, -3) : String(v));
++      data.set(k, fail.corrupt ? String(v).slice(0, -3) : fail.rewrite ? fail.rewrite(String(v)) : String(v));
+     },
+     removeItem(k) { log.push(`remove ${k}`); if (fail.remove) throw new Error('removal failed'); data.delete(k); },
+   };
+@@ -688,6 +697,54 @@ testCase('Saved sessions: a read that fails is never taken for a missing session
+   check('a read-back that throws: not reported as saved, and version 1 is kept', !r.saved && r.stage === 'verify' && /could not be read back/.test(r.error) && st.data.get(K.v1) === v1Raw && status.migrationPending, JSON.stringify(r));
+ });
+ 
++testCase('Saved sessions: version 1 is removed only when the saved model reads back as the same model', () => {
++  // A write is verified twice: the stored text must read back exactly as written, and must rebuild the same model
++  // (serialised again and compared). Text can come back unchanged and still not restore what is in memory: the reader
++  // normalises some values, for example a section area that is not positive is read as 1000 mm².
++  const K = TM.SESSION_KEYS, settings = { grid: 1 }, view = { cx: 0, cy: 0, zoom: 20 };
++  const v1Raw = JSON.stringify({ model: copy(V1_SETTLED), settings, view });
++  const migrate = (change) => {
++    const st = fakeStorage({ [K.v1]: v1Raw });
++    const L = TM.loadStoredSession(st, K);
++    const status = { migrationPending: L.migrationPending, corruptV2: L.corruptV2 };
++    if (change) change(L.model);
++    const r = TM.saveStoredSession(st, K, { model: L.model, settings: L.settings, view: L.view }, status);
++    return { st, r, status };
++  };
++  let t = migrate();
++  check('an ordinary migration passes both comparisons and removes version 1', t.r.saved && t.r.legacy === 'removed' && !t.st.data.has(K.v1));
++  t = migrate((m) => { m.groups[0].A = 0; });
++  check('a model that reads back differently (section area 0, read as 1000 mm²): its text is stored and reads back unchanged ...',
++    t.st.data.has(K.v2) && JSON.parse(t.st.data.get(K.v2)).model.sections[0].A === 0);
++  check('... but the write is not verified: not saved, stage "verify", and the reason says the model differs',
++    !t.r.saved && t.r.stage === 'verify' && /same model/.test(t.r.error || ''), JSON.stringify(t.r));
++  check('... so version 1 is kept unchanged, and the migration stays pending', t.st.data.get(K.v1) === v1Raw && t.status.migrationPending === true);
++  // the other comparison: valid text, the same model, but something else changed on the way (here the settings)
++  {
++    const st = fakeStorage({ [K.v1]: v1Raw });
++    const L = TM.loadStoredSession(st, K), status = { migrationPending: L.migrationPending, corruptV2: L.corruptV2 };
++    st.fail.rewrite = (txt) => txt.replace('"grid":1', '"grid":2');
++    const r = TM.saveStoredSession(st, K, { model: L.model, settings, view }, status);
++    check('a session that reads back as valid text with the same model, but not as written (settings changed): not saved, version 1 kept',
++      /"grid":2/.test(st.data.get(K.v2)) && !r.saved && r.stage === 'verify' && /unchanged/.test(r.error || '') && st.data.get(K.v1) === v1Raw && status.migrationPending === true, JSON.stringify(r));
++  }
++  t = migrate((m) => { m.nodes[0].x = NaN; });
++  check('a model that cannot be read back at all (a coordinate that is not a number): not saved, version 1 kept',
++    !t.r.saved && t.r.stage === 'verify' && t.st.data.get(K.v1) === v1Raw && t.status.migrationPending === true);
++  // no false alarms: every example verifies, also with a second load case, a settlement and import notes
++  const failed = [];
++  for (const [key] of TM.EXAMPLES) {
++    const m = TM.buildExample(key);
++    const lc = TM.addLoadCase(m, 'Wind');
++    TM.setNodeLoad(m, m.nodes[m.nodes.length - 1], 1500, -250, lc);
++    TM.setNodeSettlement(m, m.nodes[0], 0, -0.002, lc);
++    const st = fakeStorage({ [K.v1]: v1Raw });
++    const r = TM.saveStoredSession(st, K, { model: m, settings, view, importNotes: [{ msg: 'a note', ref: { type: 'node', index: 0 } }] }, { migrationPending: true, corruptV2: null });
++    if (!(r.saved && r.legacy === 'removed' && !st.data.has(K.v1))) failed.push(`${key}: ${JSON.stringify(r)}`);
++  }
++  check('all nine examples, each with a second load case, verify on saving (no false alarms), and version 1 is then removed', failed.length === 0, failed.join('; '));
++});
++
+ testCase('Import notes are kept with the saved session', () => {
+   const K = TM.SESSION_KEYS;
+   const statusOf = (L) => ({ migrationPending: L.migrationPending, corruptV2: L.corruptV2, readFailed: L.readFailed });

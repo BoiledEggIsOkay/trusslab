@@ -29,22 +29,24 @@ Keep `fea-core.js` one self-contained file. Change its mathematical formulation 
 
 - The existing horizontal-extent / maximum-total-displacement ratio is not approved as a general structural design acceptance criterion. Do not implement the design deflection check until a physically appropriate measure has been agreed upon and documented.
 - Never add safety factors, utilisations or member classifications across load cases or combinations. Solve each combination directly and take the worst governing value.
-- Until milestone 3, λ scales nodal loads but not prescribed settlements. Milestone 3 changes this on purpose so that λ scales both.
+- Since milestone 3, λ scales every action of the active load case: nodal loads and prescribed settlements alike. λ = 0 gives zero results only for a stable model; a mechanism stays unstable at any λ.
 
 ## Current code
 
 | Global | Defined in | Notes |
 |---|---|---|
 | `FEA` | `fea-core.js` | Numerical engine; also `module.exports` under Node |
-| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects, file format version 1, examples, `toAnalysisInput`; also `module.exports` under Node |
+| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects and load cases, file format version 2 (`readModel` also reads version 1 files, reports and sessions), `validateModel`, examples, `toAnalysisInput`, saved-session storage with injected `Storage` (`loadStoredSession`, `saveStoredSession`); also `module.exports` under Node |
 | `TrussLab` | `script.js` (end) | Older test hook that exposes live internal state. Keep it unchanged for compatibility; new code and tests must not depend on it |
-| `TrussLabTest` | `script.js` section 17 | Testing adapter, version 1, installed only in smoke mode (`?smoke`) |
+| `TrussLabTest` | `script.js` section 17 | Testing adapter, version 2, installed only in smoke mode (`?smoke`) |
 
 Script order in `index.html`: `fea-core.js`, `model.js`, then `script.js`.
 
+Saved sessions live in `localStorage` under `trusslab.session.v2`; `trusslab.session.v1` is migrated once and removed only after a verified version 2 write, and an unreadable version 2 session is kept under `trusslab.session.v2.unreadable` (`.2`, `.3`, …). Smoke mode uses the `trusslab.smoke-test.session.*` keys and never touches the user's.
+
 ## Tests
 
-- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (206 checks, including the nine examples against the regression baseline in `test/fixtures/examples-baseline.js`).
+- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (393 checks, including the nine examples at λ = 1 against the regression baseline in `test/fixtures/examples-baseline.js`).
 - Browser smoke test (`test/browser-smoke.js`), in two modes:
   - `index.html?smoke` runs every scenario against the real page and must end with PASS.
   - `index.html?smoke=selftest` adds one deliberately failing scenario. It ends with PASS only if exactly that scenario fails and every clean-up check still passes, which shows that a failing test cannot damage the user's work.
@@ -57,13 +59,10 @@ Done:
 - `0bb4657` Rev 2, milestone 1: browser smoke test and the `TrussLabTest` adapter.
 - `0e3dbae` Rev 3: the D and G shortcuts refresh the legend and autosave.
 - `3b88695`, `1a0b122`: `CLAUDE.md`, the project Skills, local testing notes, the vendored `frontend-design` Skill, `trusslab-ui-design` and the redesign milestone.
-- Milestone 2: DOM-free model layer. `model.js` (global `TrussModel`) with `toAnalysisInput`, `test/model.test.js` (206 checks) and the example baseline `test/fixtures/examples-baseline.js`. No behaviour change; file format version 1 unchanged.
+- `4712cba` Rev 4, milestone 2: DOM-free model layer. `model.js` (global `TrussModel`) with `toAnalysisInput`, `test/model.test.js` (206 checks) and the example baseline `test/fixtures/examples-baseline.js`. No behaviour change; file format version 1 unchanged.
+- Milestone 3: load cases. Loads and settlements belong to load cases; supports keep only their restraint (type, angle, fixed axes). λ scales loads and settlements. File format version 2, reading version 1 model files, report files and autosaved sessions (with migration tests for each); verified session migration, backups of unreadable sessions, no writes after a failed read, import notes kept with the session, "Changes not saved — browser storage unavailable" status notes; model warnings (`validateModel`); `TrussLabTest` version 2.
 
 Next, strictly one at a time, each approved before the next begins:
-3. Load cases. Settlements move from supports into load cases, and λ scales loads and settlements. File format version 2, which must keep reading, with a migration test for each:
-   - existing version 1 model files;
-   - autosaved sessions in `localStorage` (`trusslab.session.v1`, which wrap the model together with settings and view);
-   - exported calculation-report files, which nest the model under `model`.
 4. Material density and a generated self-weight load case.
 5. Load combinations solved directly, with worst-case results.
 6. UI/UX redesign, before any educational interface (follow `trusslab-ui-design`):

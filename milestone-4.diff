@@ -1,0 +1,1137 @@
+diff --git a/.claude/skills/trusslab-architecture/SKILL.md b/.claude/skills/trusslab-architecture/SKILL.md
+index 8a7d8da..d1b9803 100644
+--- a/.claude/skills/trusslab-architecture/SKILL.md
++++ b/.claude/skills/trusslab-architecture/SKILL.md
+@@ -22,7 +22,7 @@ A feature that truly needs a network goes into the documentation as an optional
+ | File | Role | Global |
+ |---|---|---|
+ | `fea-core.js` | Numerical engine, no DOM | `FEA` (plus `module.exports` under Node) |
+-| `model.js` | DOM-free model layer: parser, sections, constructors, supports, serialisation, examples, solver input (`toAnalysisInput`) | `TrussModel` (plus `module.exports` under Node) |
++| `model.js` | DOM-free model layer: parser, sections, constructors, supports, load cases and the generated self-weight case, serialisation, examples, solver input (`toAnalysisInput`) | `TrussModel` (plus `module.exports` under Node) |
+ | `script.js` | All page code: one IIFE in numbered sections | `TrussLab` (older hook), `TrussLabTest` (smoke mode only) |
+ | `index.html`, `style.css` | Layout, help dialog, theme | none |
+ | `test/*.test.js` | Headless suites (jsc or Node) | none |
+diff --git a/.claude/skills/trusslab-engineering-rules/SKILL.md b/.claude/skills/trusslab-engineering-rules/SKILL.md
+index c056712..0d26c1b 100644
+--- a/.claude/skills/trusslab-engineering-rules/SKILL.md
++++ b/.claude/skills/trusslab-engineering-rules/SKILL.md
+@@ -15,7 +15,7 @@ TrussLab teaches from the operations its solver really performs. Every number sh
+ - Change the mathematical formulation only with a stated reason, documentation in the README's "Method" section, and regression tests.
+ - Never add safety factors, utilisations or member classifications across load cases or combinations: they are not linear in the loads.
+ - The existing horizontal-extent / maximum-total-displacement ratio is not approved as a general structural design acceptance criterion. Do not implement the design deflection check until a physically appropriate measure has been agreed upon and documented.
+-- Not modelled: temperature, geometric or material nonlinearity, dynamics, inelastic buckling, connection design, or design-code resistance factors. Self-weight arrives in milestone 4.
++- Not modelled: temperature, geometric or material nonlinearity, dynamics, inelastic buckling, connection design, or design-code resistance factors. Self-weight (milestone 4) is lumped as nodal loads, W/2 at each end node; distributed loads are not modelled.
+ 
+ ## Units and signs
+ 
+@@ -29,7 +29,7 @@ TrussLab teaches from the operations its solver really performs. Every number sh
+ | Milestone | Rule, in short | Details |
+ |---|---|---|
+ | 3 Load cases (done) | Every prescribed action (nodal forces and settlements) belongs to a load case; supports keep only restraint geometry. λ scales loads and settlements alike; λ = 0 gives zero results only for a stable model. File format version 2 reads version 1 files, reports and sessions | `model-format.md` §3–§7, `analysis-math.md` §4 |
+-| 4 Self-weight | Generated dead-load case: W = ρAL·g, half to each end node, gravity −y, recomputed after section changes. No distributed loads | `analysis-math.md` §6 |
++| 4 Self-weight (done) | Generated dead-load case: W = ρAL·g, half to each end node, gravity −y, recomputed after any change to geometry, sections or materials (computed on every read, never stored). Densities in kg/m³; none for custom materials or older files. No distributed loads | `analysis-math.md` §6, `model-format.md` §1, §3–§6 |
+ | 5 Combinations | Solve each combination's factored state directly; design checks take the worst governing value | `analysis-math.md` §5, `design-conventions.md` §3 |
+ | 10 Sizing | Discrete candidates per section group, sorted by ρA; iterate with a cap, cycle detection and an explicit not-converged result | `design-conventions.md` §4 |
+ | 10 Deflection | Only after a physically appropriate measure is agreed and documented | `design-conventions.md` §5 |
+diff --git a/.claude/skills/trusslab-engineering-rules/references/analysis-math.md b/.claude/skills/trusslab-engineering-rules/references/analysis-math.md
+index 1b24ede..a0750fd 100644
+--- a/.claude/skills/trusslab-engineering-rules/references/analysis-math.md
++++ b/.claude/skills/trusslab-engineering-rules/references/analysis-math.md
+@@ -73,9 +73,15 @@ For each combination c with factors γ_i on load cases i:
+ 
+ Superposing u and N would be valid for a linear model, but the workflow solves each combination directly so that every reported number is one the solver produced. Safety factors, utilisations and classifications are never added up (see `design-conventions.md` §3).
+ 
+-## 6. Self-weight (milestone 4)
++## 6. Self-weight (milestone 4, done)
+ 
+-- Materials need a density ρ (kg/m³). A member weighs W = ρ·A·L·g, with g = 9.80665 m/s² (state the value used). Gravity acts in −y.
+-- Self-weight is its own generated dead-load case. Each end node receives W/2: F_y,1 = F_y,2 = −ρALg/2.
++- Materials need a density ρ (kg/m³). A member weighs W = ρ·A·L·g, with g = 9.80665 m/s² (standard gravity, `TrussModel.GRAVITY`; state the value used). Gravity acts in −y. Units: kg/m³ · m² · m · m/s² = kg·m/s² = N.
++- Self-weight is its own generated dead-load case. Each end node receives W/2: F_y,1 = F_y,2 = −ρALg/2, F_x = 0. For a pin-ended member these are the end reactions of its own uniform weight (statics, by symmetry), so applying them at the joints is the statically equivalent lumping: the truss stays axial-only, and the member's own bending between its ends is not modelled.
+ - Regenerate it after any change to a section, material, or node coordinates, because it depends on the current A, ρ and L.
+ - No distributed loads in this milestone. The equivalent end loads above are the whole treatment.
++
++How the code does it:
++- `memberSelfWeight(member)` returns `{ density, A, L, g, W }`, with L = hypot(Δx, Δy) (the same length the solver uses) and W = 0 when the material has no density (`density` is then `null`).
++- `selfWeightLoads(model)` adds −W/2 to both end nodes of every member, in member order, and returns `Map(node → { fx: 0, fy })` with non-zero entries only. It is called on every read (`caseLoads`, so `nodeLoad` and `toAnalysisInput`), never stored: "regenerate after any change" holds by construction, and repeated computation cannot accumulate.
++- `toAnalysisInput(model, { loadFactor: λ, loadCase: selfWeightCase })` multiplies these loads by λ like any other (§4). The case has no settlements.
++- For milestone 5, the self-weight case is an ordinary member of `model.loadCases` with a uid, so a combination can name it and take γ·F from `caseLoads` like any other case. Combinations are not implemented.
+diff --git a/.claude/skills/trusslab-engineering-rules/references/model-format.md b/.claude/skills/trusslab-engineering-rules/references/model-format.md
+index 90bf768..c4dbea1 100644
+--- a/.claude/skills/trusslab-engineering-rules/references/model-format.md
++++ b/.claude/skills/trusslab-engineering-rules/references/model-format.md
+@@ -8,18 +8,19 @@ The code lives in `model.js` (global `TrussModel`): `serialize`, `readModel` (an
+ 
+ ```
+ model    = { title, nodes: [node], members: [member], materials: [material], groups: [group], loadCases: [loadCase], activeCase }
+-material = { uid, preset: 'steel' | 'aluminum' | 'fir' | 'custom', name, E, fy, color }
++material = { uid, preset: 'steel' | 'aluminum' | 'fir' | 'custom', name, E, fy, density, color }   // density: kg/m³, or null (not set)
+ group    = { uid, name, material, shape: { type, ...dims }, color, A, I }        // a "section" in files
+ node     = { uid, x, y, support: { type, angle, fixX, fixY } }
+ member   = { uid, n1, n2, group }
+-loadCase = { uid, name, loads: Map(node → { fx, fy }), settlements: Map(node → { dx, dy }) }
++loadCase = { uid, name, generated: null | 'self-weight', loads: Map(node → { fx, fy }), settlements: Map(node → { dx, dy }) }
+ ```
+ 
+ - Objects refer to each other by reference (`group.material`, `member.n1`, `member.group`, the Map keys, `model.activeCase`), not by id. A `uid` exists only for the current session and is never saved.
+ - Array order defines the numbering (N1, M1, load case 1, …) and the solver indices.
+ - Units are SI base units: m, N, Pa, m², m⁴, with angles in degrees. `fy` is the yield or limit stress.
+ - A model always has at least one load case, and `activeCase` is one of them. `emptyModel()` and every reader create "Load case 1".
+-- Material presets: steel E 200 GPa, σy 250 MPa; 6061-T6 aluminium 68.9 GPa, 276 MPa; Douglas fir 11 GPa, 49.9 MPa; custom 100 GPa, 200 MPa. Douglas fir's 49.9 MPa is the clear-wood compressive strength parallel to the grain at 12 % moisture content (USDA Wood Handbook), not a graded design value.
++- Material presets: steel E 200 GPa, σy 250 MPa, ρ 7850 kg/m³; 6061-T6 aluminium 68.9 GPa, 276 MPa, 2700 kg/m³; Douglas fir 11 GPa, 49.9 MPa, 540 kg/m³; custom 100 GPa, 200 MPa, no density. Douglas fir's 49.9 MPa is the clear-wood compressive strength parallel to the grain at 12 % moisture content (USDA Wood Handbook), not a graded design value; its 540 kg/m³ is the specific gravity 0.48 at 12 % moisture content from the same source × 1.12 for the water × 1000 kg/m³ ≈ 538, rounded.
++- **Density** (`density`, kg/m³) is used only for self-weight. `validDensity(v)`: a finite number, 0 or more; anything else, and `null`, means not set, and a member of that material then has no self-weight. A custom material starts without a density: an invented value would give a wrong self-weight with no warning. 0 is a deliberate value (a weightless material), not a missing one.
+ - Section shapes (`sectionProps`): `custom` (A and I entered directly), `rod {d}`, `chs {D, t}` (2t ≤ D), `rect {b, h}`, `rhs {b, h, t}` (2t < min(b, h)). Dimensions are in metres. A and the minimum (weak-axis) I are computed from the dimensions, assuming sharp corners.
+ 
+ ## 2. Supports
+@@ -46,6 +47,7 @@ A support holds only its restraint: which axes of its nodal frame are fixed, and
+ - A settlement on an axis that is not fixed is stored, but has no effect: `toAnalysisInput` passes a settlement only on a fixed axis, and `validateModel` warns.
+ - `addLoadCase` (named "Load case N", not activated), `removeLoadCase` (never the last; when the active case goes, a neighbour becomes active), `setActiveLoadCase`, `removeNodeActions` (deleting nodes deletes their loads and settlements in every case), `modelHasSettlement`.
+ - `toAnalysisInput(model, { loadFactor: λ, loadCase, targetSF })` analyses one case (default: the active one) and multiplies all its actions by λ: `fx·λ`, `fy·λ`, `dx·λ`, `dy·λ`. See `analysis-math.md` §4.
++- **The self-weight case** (milestone 4) is a load case with `generated: 'self-weight'`, added by `addSelfWeightCase(model)` (at most one per model; not activated; the page activates it). Its loads are never stored: `caseLoads(model, lc)` returns `selfWeightLoads(model)` for it, computed now from the current geometry, sections and materials, so they cannot go stale or add up. `nodeLoad` and `toAnalysisInput` read through `caseLoads`. `setNodeLoad` and `setNodeSettlement` return `false` and change nothing in it, so manual actions never mix with generated ones; in every other case they return `true`. See `analysis-math.md` §6 for W = ρ·A·L·g and the lumping.
+ - In `script.js`, undo snapshots are `JSON.stringify({ model: serialize(model), caseUids })`: the uids let an undo keep the load case on screen active when it still exists. Switching the active case is not an edit and is not undone.
+ 
+ ## 4. File format version 2 (`serialize`)
+@@ -55,19 +57,21 @@ A support holds only its restraint: which axes of its nodal frame are fixed, and
+   "format": "trusslab-model", "version": 2,
+   "units": { "length": "m", "force": "N", "stress": "Pa", "area": "m^2", "inertia": "m^4", "angle": "deg" },
+   "title": "…",
+-  "materials": [{ "id": 1, "name": "…", "preset": "steel", "E": 2e11, "fy": 2.5e8, "color": "#94a3b8" }],
++  "materials": [{ "id": 1, "name": "…", "preset": "steel", "E": 2e11, "fy": 2.5e8, "density": 7850, "color": "#94a3b8" }],
+   "sections":  [{ "id": 1, "name": "…", "material": 1, "A": 1e-3, "I": 1e-6, "shape": { "type": "custom" }, "color": "#38bdf8" }],
+   "nodes":     [{ "id": 1, "x": 0, "y": 0, "support": { "type": "pin", "angle": 0, "fixX": true, "fixY": true } }],
+   "members":   [{ "id": 1, "n1": 1, "n2": 3, "section": 1 }],
+   "loadCases": [{ "id": 1, "name": "Load case 1",
+                   "loads":       [{ "node": 3, "fx": 0, "fy": -100000 }],
+-                  "settlements": [{ "node": 2, "dx": 0, "dy": -0.01 }] }],
++                  "settlements": [{ "node": 2, "dx": 0, "dy": -0.01 }] },
++                { "id": 2, "name": "Self-weight", "generated": "self-weight", "loads": [], "settlements": [] }],
+   "activeLoadCase": 1
+ }
+ ```
+ 
+ - Ids are 1-based. `section.material`, `member.n1`/`n2`, `member.section`, the entries' `node` and `activeLoadCase` refer to those ids.
+ - Load and settlement lists are sparse (non-zero entries only), in node order. Every support is written with all four fields, so a custom support with no fixed axis round-trips exactly.
++- Milestone 4 added two optional fields to version 2 (see §8): a material's `density` (kg/m³, or `null` when not set), and `"generated": "self-weight"` on the self-weight case, which is written without loads or settlements because they are computed again from the members when the file is read. An ordinary case has no `generated` field.
+ - Exporting version 1 is discontinued. Model files, calculation reports (`{ meta, model, … }`; `meta` also names the analysed load case) and saved sessions all contain version 2.
+ 
+ ## 5. What `readModel` accepts
+@@ -95,6 +99,11 @@ The page shows a one-time notice when a version 1 model, report or session with
+ - a missing or empty `loadCases` gives an empty "Load case 1", with a note; an `activeLoadCase` that names no case makes the first case active, with a note;
+ - unknown fields are ignored, for forward compatibility. Names are trimmed and cut to 80 characters; an empty name becomes "Load case N".
+ 
++**Densities and the self-weight case** (milestone 4):
++- A missing or `null` density means not set, without a note: files written before milestone 4 have none, and the preset is not used to fill it in, because the material may have been changed since it was created. Every version 1 file therefore reads without densities.
++- A density that is a number, or a string holding one, of 0 or more is kept; anything else (negative, not finite, text, `true`, an object) is not set, with a note.
++- A case with `"generated": "self-weight"` is read as the generated case; loads or settlements stored with it are not applied (they would be stale), with a note. A case with any other `generated` value is read as an ordinary case with its entries, with a note that this version cannot generate it.
++
+ **Normalisation** in both versions (`readStructure`):
+ - An unknown material preset becomes `custom`. Invalid E or fy falls back to the preset value. Names are cut to 80 characters and the title to 120. Colours must be `#rrggbb`.
+ - An unknown shape becomes `custom`. For other shapes, A and I are recomputed from the dimensions. A non-positive A or I becomes 1000 mm² or 1×10⁶ mm⁴.
+@@ -109,6 +118,7 @@ Checks the solver does not make, returned as `{ msg, ref }` and shown in the hea
+ - "Node N: the custom support has neither x′ nor y′ fixed, so it provides no restraint."
+ - "Node N: the settlement along y′ in "Load case 1" has no effect, because y′ is not fixed." (x′, y′, or both)
+ - "Node N is not connected to any member, so its settlement in "…" has no effect."
++- Only when the model has a self-weight case: "Material "…" has no density, so its N members carry no weight in "Self-weight"." (one per material, in material order)
+ 
+ ## 7. Saved sessions in browser storage
+ 
+@@ -129,6 +139,8 @@ Smoke mode uses `SMOKE_SESSION_KEYS` (`trusslab.smoke-test.session.v2`, `.v1`, `
+ 
+ ## 8. Rules for a future version 3
+ 
++Milestone 4 extended version 2 without a version bump, on purpose: `density` and `generated` are optional, a file without them reads exactly as before, and a version 2 reader that does not know them (milestone 3) loses only those additions, never structural data or entered loads: it reads the self-weight case as an empty ordinary case and the materials without density. Bumping the version would have made every new file unreadable for that reader and required a new session key. Add further fields the same way only when the same holds; otherwise bump the version as below.
++
+ - Keep reading versions 1 and 2, and all three wrappers, with a migration test for each.
+ - Never delete the only recoverable copy of a user's session: write and verify the new key before removing an old one.
+ - Bump `FORMAT_VERSION`, the session key and `TrussLabTest.version` only together with migration code and tests.
+diff --git a/.claude/skills/trusslab-ui-design/SKILL.md b/.claude/skills/trusslab-ui-design/SKILL.md
+index b75a3c5..6affb97 100644
+--- a/.claude/skills/trusslab-ui-design/SKILL.md
++++ b/.claude/skills/trusslab-ui-design/SKILL.md
+@@ -75,9 +75,9 @@ These are hypotheses for the audit to confirm or reject, not decisions.
+ - **Tokens** are CSS custom properties in `style.css` `:root`. Use semantic names first (`--color-tension`), then component use. The canvas reads the same tokens once at start-up (`getComputedStyle(document.documentElement)`) instead of keeping its own copy.
+ - UI code stays in the matching `script.js` section; DOM-free logic goes elsewhere.
+ - **The smoke-test contract.** `test/browser-smoke.js` relies on these names and words. Renaming or rewording any of them requires updating the test in the same change:
+-  - ids: `#app`, `#canvas`, `#banner`, `#legend`, `#statusPill`, `#health`, `#inspector`, `#insResults`, `#leftPanel`, `#rightPanel`, `#btnExport`, `#exportMenu`, `#btnFit`, `#btnPanels`, `#btnUndo`, `#btnRedo`, `#chkLive`, `#chkSnap`, `#chkSnapNodes`, `#rngLoadFactor`, `#numLoadFactor`, `#selExample`, `#selForceUnit`, `#fileInput`, `#groupsList`, `#helpModal`, `#logText`, `#mtxView`, `#sbCounts`, `#sbSnap`, `#segGrid`, `#segMatrix`, `#segMtxMode`, `#tab-members`, `#tab-nodes`, `#tab-matrix`, `#toolOptions`, `#toX`, `#toFx`, `#toFy`, `#toGroup`, `#toLoadMode`, `#toSupType`, and from milestone 3 `#selLoadCase`, `#btnAddCase`, `#txtCaseName`, `#btnDeleteCase`, `#updateNotice`, `#btnDismissNotice`, `#sbSave`;
++  - ids: `#app`, `#canvas`, `#banner`, `#legend`, `#statusPill`, `#health`, `#inspector`, `#insResults`, `#leftPanel`, `#rightPanel`, `#btnExport`, `#exportMenu`, `#btnFit`, `#btnPanels`, `#btnUndo`, `#btnRedo`, `#chkLive`, `#chkSnap`, `#chkSnapNodes`, `#rngLoadFactor`, `#numLoadFactor`, `#selExample`, `#selForceUnit`, `#fileInput`, `#groupsList`, `#helpModal`, `#logText`, `#mtxView`, `#sbCounts`, `#sbSnap`, `#segGrid`, `#segMatrix`, `#segMtxMode`, `#tab-members`, `#tab-nodes`, `#tab-matrix`, `#toolOptions`, `#toX`, `#toFx`, `#toFy`, `#toGroup`, `#toLoadMode`, `#toSupType`, and from milestone 3 `#selLoadCase`, `#btnAddCase`, `#txtCaseName`, `#btnDeleteCase`, `#updateNotice`, `#btnDismissNotice`, `#sbSave`, and from milestone 4 `#btnAddSelfWeight`, `#selfWeightNote` (its `hidden` property), `#materialsList .mat-card[data-mi=…] [data-mf="density"]`;
+   - attributes and classes: `.tool[data-tool=…]`, `.tab[data-tab=…]`, `[data-show="showDeformed"]`, `[data-grid]`, `[data-mtx]`, `[data-mode]`, the class `on` for active buttons, `no-panels`, `show-left`, `show-right`, the Inspector fields `#inspector [data-f="stype"]`, `[data-f="sfixx"]`, `[data-f="sfixy"]`, and the `hidden` property of `#updateNotice` and `#sbSave`;
+-  - wording: "UNSTABLE" (status pill and health report), "Node N4" (Inspector title), "unstable" (Inspector note), "Analysis completed" (solver log), "Reduced" (matrix legend), "snap off" / "snap 0.5 m" (status bar), "N nodes" (status bar counts), "Load case 2" (the default name of a new case), "provides no restraint" (health report and Inspector), "scales nodal loads and prescribed support settlements alike" (the λ notice), "Changes not saved — browser storage unavailable" and "Saved. The old version 1 session could not be removed yet" (status bar, `#sbSave`), "Import notes" and "was not applied" (health report).
++  - wording: "UNSTABLE" (status pill and health report), "Node N4" (Inspector title), "unstable" (Inspector note), "Analysis completed" (solver log), "Reduced" (matrix legend), "snap off" / "snap 0.5 m" (status bar), "N nodes" (status bar counts), "Load case 2" (the default name of a new case), "provides no restraint" (health report and Inspector), "scales nodal loads and prescribed support settlements alike" (the λ notice), "Changes not saved — browser storage unavailable" and "Saved. The old version 1 session could not be removed yet" (status bar, `#sbSave`), "Import notes" and "was not applied" (health report), and from milestone 4 "Self-weight" (the name of the generated case), "(generated)" (case list), "Self-weight (generated)" and "ρ·A·L·g" (health report), "Self-weight load in" and "Half the weight of each member" (node Inspector), "W = ρ·A·L·g", "kg/m³" and "m/s²" (member Inspector).
+ 
+ ## Accessibility and keyboard: the quality floor
+ 
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 881dacb..984593e 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -36,7 +36,7 @@ Keep `fea-core.js` one self-contained file. Change its mathematical formulation
+ | Global | Defined in | Notes |
+ |---|---|---|
+ | `FEA` | `fea-core.js` | Numerical engine; also `module.exports` under Node |
+-| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects and load cases, file format version 2 (`readModel` also reads version 1 files, reports and sessions), `validateModel`, examples, `toAnalysisInput`, saved-session storage with injected `Storage` (`loadStoredSession`, `saveStoredSession`); also `module.exports` under Node |
++| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects and load cases, material densities and the generated self-weight case (`memberSelfWeight`, `selfWeightLoads`, `caseLoads`), file format version 2 (`readModel` also reads version 1 files, reports and sessions), `validateModel`, examples, `toAnalysisInput`, saved-session storage with injected `Storage` (`loadStoredSession`, `saveStoredSession`); also `module.exports` under Node |
+ | `TrussLab` | `script.js` (end) | Older test hook that exposes live internal state. Keep it unchanged for compatibility; new code and tests must not depend on it |
+ | `TrussLabTest` | `script.js` section 17 | Testing adapter, version 2, installed only in smoke mode (`?smoke`) |
+ 
+@@ -46,7 +46,7 @@ Saved sessions live in `localStorage` under `trusslab.session.v2`; `trusslab.ses
+ 
+ ## Tests
+ 
+-- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (393 checks, including the nine examples at λ = 1 against the regression baseline in `test/fixtures/examples-baseline.js`).
++- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (544 checks, including the nine examples at λ = 1 against the regression baseline in `test/fixtures/examples-baseline.js`).
+ - Browser smoke test (`test/browser-smoke.js`), in two modes:
+   - `index.html?smoke` runs every scenario against the real page and must end with PASS.
+   - `index.html?smoke=selftest` adds one deliberately failing scenario. It ends with PASS only if exactly that scenario fails and every clean-up check still passes, which shows that a failing test cannot damage the user's work.
+@@ -62,8 +62,9 @@ Done:
+ - `4712cba` Rev 4, milestone 2: DOM-free model layer. `model.js` (global `TrussModel`) with `toAnalysisInput`, `test/model.test.js` (206 checks) and the example baseline `test/fixtures/examples-baseline.js`. No behaviour change; file format version 1 unchanged.
+ - Milestone 3: load cases. Loads and settlements belong to load cases; supports keep only their restraint (type, angle, fixed axes). λ scales loads and settlements. File format version 2, reading version 1 model files, report files and autosaved sessions (with migration tests for each); verified session migration, backups of unreadable sessions, no writes after a failed read, import notes kept with the session, "Changes not saved — browser storage unavailable" status notes; model warnings (`validateModel`); `TrussLabTest` version 2.
+ 
++- Milestone 4: material density and the generated self-weight load case. Materials carry a density ρ in kg/m³ (presets: steel 7850, aluminium 2700, Douglas fir 540; none for a custom material or for materials read from older files). **+ Self-weight case** adds one generated dead-load case: W = ρ·A·L·g (g = 9.80665 m/s²) per member, W/2 downward at each end node, computed from the current model whenever it is read, never stored, so it cannot go stale or accumulate; manual loads and settlements are refused in it. Saved as additive optional fields of file format version 2 (`density`, `"generated": "self-weight"`). Warnings for materials without density.
++
+ Next, strictly one at a time, each approved before the next begins:
+-4. Material density and a generated self-weight load case.
+ 5. Load combinations solved directly, with worst-case results.
+ 6. UI/UX redesign, before any educational interface (follow `trusslab-ui-design`):
+    - audit the complete existing UI and identify the sources of unnecessary complexity;
+diff --git a/README.md b/README.md
+index 09d85f7..478de6f 100644
+--- a/README.md
++++ b/README.md
+@@ -15,7 +15,7 @@ python3 -m http.server 8000   # then browse to http://localhost:8000
+ | `index.html` | Page layout, panels and help dialog |
+ | `style.css` | Dark CAD-style theme |
+ | `fea-core.js` | Numerical engine (no DOM). Usable from Node: `require('./fea-core.js').analyze(input)` |
+-| `model.js` | Model layer (no DOM): expression parser, materials and sections, model objects, the file format, the examples, and the solver input. Usable from Node: `require('./model.js')` |
++| `model.js` | Model layer (no DOM): expression parser, materials and sections, model objects, load cases and the generated self-weight case, the file format, the examples, and the solver input. Usable from Node: `require('./model.js')` |
+ | `script.js` | Editor, canvas rendering, inspector, tables, matrix inspector and exports |
+ | `test/fea-core.test.js` | Regression tests for the numerical engine (see [Accuracy checks performed](#accuracy-checks-performed)) |
+ | `test/model.test.js` | Headless tests for `model.js`, including the results of all nine examples against `test/fixtures/examples-baseline.js` |
+@@ -32,7 +32,8 @@ The session (model, view, settings) is autosaved in the browser's `localStorage`
+ - Supports: pin, roller (u_y = 0), roller (u_x = 0), inclined roller at angle α, and custom supports that fix x′ and/or y′ of a frame rotated by α. A custom support with neither axis fixed restrains nothing, and TrussLab warns about it.
+ - Load cases: nodal loads and support settlements belong to a load case. **+ New** adds an empty case and makes it active; the list switches between cases, the name field renames the active case, and **Delete** removes it (Ctrl+Z undoes it; the last case cannot be deleted). The active case is the one you edit and analyse. Switching cases is not an edit, so it is not undone; undo keeps the case you are looking at whenever it still exists.
+ - Settlements: any fixed axis of any support can settle (Inspector, "Settlement in …"). A settlement is measured along the support's own axes x′, y′. A settlement on an axis that is not fixed, or on a node with no members, has no effect, and TrussLab warns about it.
+-- Materials: Structural Steel (E 200 GPa, σy 250 MPa), 6061-T6 Aluminum (E 68.9 GPa, σy 276 MPa), Douglas Fir (E 11 GPa), or custom.
++- Materials: Structural Steel (E 200 GPa, σy 250 MPa, ρ 7850 kg/m³), 6061-T6 Aluminum (E 68.9 GPa, σy 276 MPa, ρ 2700 kg/m³), Douglas Fir (E 11 GPa, ρ 540 kg/m³), or custom. Each material has a density ρ in kg/m³ for self-weight. A custom material has none until you enter one, and materials read from files written before density existed have none either (the preset is not used to guess it, because the material may have been changed): their members then carry no self-weight, and TrussLab warns about it.
++- Self-weight: **+ Self-weight case** adds a generated load case and makes it active. Each member weighs W = ρ·A·L·g (its material's density, its section area, its length, g = 9.80665 m/s²), and half of it acts downward at each end node. The loads are computed from the current geometry, sections and materials whenever they are needed, so they follow every edit and are never stored, never added twice, and cannot be edited by hand; the other load cases are not touched. The case is solved on its own like any other, and λ scales it. The Inspector shows a member's weight with the numbers it comes from, and a node's generated load with the members it comes from; the health report explains the case. A model has at most one self-weight case; **Delete** removes it.
+ - Sections: section groups with custom A and I, or a calculator for solid round, CHS, solid rectangle and RHS/SHS. The calculator uses the weak-axis I.
+ - Load factor λ scales every action of the active load case live: nodal loads and prescribed settlements alike. Because the model is linear, displacements, member forces and reactions scale by λ too. At λ = 0 there are no actions, so a stable structure has no displacements, member forces or reactions; a mechanism stays unstable at any λ.
+ - Deflection scale runs 1× to 1000× on the slider (typed values up to 10⁶), with an Auto mode.
+@@ -41,7 +42,7 @@ The session (model, view, settings) is autosaved in the browser's `localStorage`
+ 
+ ## Files and saved sessions
+ 
+-- Model files, exported reports and saved sessions use file format version 2. The model's load cases are saved with their loads and settlements; each support keeps only its type, angle and fixed axes.
++- Model files, exported reports and saved sessions use file format version 2. The model's load cases are saved with their loads and settlements; each support keeps only its type, angle and fixed axes. Since milestone 4 each material also stores its `density` (kg/m³, or `null` when not set), and the self-weight case is saved as `"generated": "self-weight"` without loads, which are computed again when the file is read. Both fields are optional additions to version 2: files without them still read.
+ - **Open…** reads version 2 and version 1 model files, exported calculation reports (the model is nested under `model`) and saved sessions. A version 1 model is converted on opening:
+   - its nodal loads and the settlements of its custom supports become "Load case 1";
+   - version 1 ignored settlements on pins and rollers, so they are not applied now either; each one is listed under "Import notes" in the health report;
+@@ -62,7 +63,7 @@ The session (model, view, settings) is autosaved in the browser's `localStorage`
+ 1. Element matrix in global axes: `[kᵉ] = (EA/L)[c² cs −c² −cs; cs s² −cs −s²; …]`, where `c = Δx/L`, `s = Δy/L` and `L = hypot(Δx, Δy)`. This avoids the trigonometric round-off of computing cos(atan2(…)).
+ 2. Assembly of the 2n × 2n `[K]` with Neumaier-compensated summation. The result is exactly symmetric.
+ 3. Inclined supports: exact rotation of the nodal frames, `K′ = Λ K Λᵀ`, `F′ = Λ F` (no penalty springs).
+-4. Partition: `K_ff u_f = λF_f − K_fs(λu_s)`, where λ multiplies the nodal loads F and the prescribed settlements u_s of the active load case. The system is linear, so `u(λ) = λ·u(1)`, and member forces and reactions scale by λ as well.
++4. Partition: `K_ff u_f = λF_f − K_fs(λu_s)`, where λ multiplies the nodal loads F and the prescribed settlements u_s of the active load case. In the generated self-weight case, F holds the end loads `F_y = −W/2` of every member, with `W = ρ·A·L·g` and g = 9.80665 m/s²: for a pin-ended member these are the end reactions of its own uniform weight, so the truss carries the weight as nodal loads and stays axial-only (the member's own bending under its weight is not modelled). The system is linear, so `u(λ) = λ·u(1)`, and member forces and reactions scale by λ as well.
+ 5. **Stability verification before solving**:
+    - zero-stiffness DOFs are detected;
+    - Jacobi equilibration `K̃ = D^-½ K_ff D^-½`;
+@@ -93,7 +94,7 @@ node test/fea-core.test.js
+ /System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc test/fea-core.test.js
+ ```
+ 
+-It prints one line per check and exits with a non-zero code if any check fails. `test/model.test.js` covers `model.js` (the expression parser, section properties, load cases, file format version 2 and the import of version 1 files, reports and sessions, λ scaling of loads and settlements, the model warnings, saved-session migration and recovery with simulated storage failures, the solver input, and the nine examples at λ = 1) and runs the same way.
++It prints one line per check and exits with a non-zero code if any check fails. `test/model.test.js` covers `model.js` (the expression parser, section properties, load cases, file format version 2 and the import of version 1 files, reports and sessions, λ scaling of loads and settlements, the model warnings, saved-session migration and recovery with simulated storage failures, the solver input, material densities and the generated self-weight case against hand statics, and the nine examples at λ = 1) and runs the same way.
+ 
+ | Case | Reference | Max. relative error |
+ |------|-----------|---------------------|
+@@ -128,6 +129,7 @@ It drives the real app through its own event handlers. It sends pointer events t
+ - the warning for a custom support that restrains nothing;
+ - the λ notice when opening version 1 files and reports with and without a settlement;
+ - switching a support to Custom without turning its frame (0° included) or its settlement;
++- the self-weight case: adding it, its reactions against ρ·A·L·g, the Load tool refused in it, the read-only Inspector values, recalculation after moving a node and changing a density (and undo), λ, the other case unchanged, saving and reloading, and deleting it;
+ - import notes kept after a save and restart, restored by undo, and cleared by a new model;
+ - migration of a version 1 session, a session that cannot be read, and the "Changes not saved" notes, with storage failures simulated on the smoke-test keys only;
+ - autosave;
+@@ -146,10 +148,11 @@ The test reads the app through `window.TrussLabTest`, a small adapter that `scri
+ 
+ ## Assumptions and limitations
+ 
+-- Pin-jointed members carry axial force only. Loads act at nodes only. No self-weight, temperature, or geometric or material non-linearity.
++- Pin-jointed members carry axial force only. Loads act at nodes only: self-weight too, lumped as half of each member's weight at each end node. No distributed loads, temperature, or geometric or material non-linearity.
+ - Linear (small-displacement) theory: equilibrium is written in the undeformed geometry.
+ - Euler buckling assumes ideal pin-ended members (K = 1) about the axis of the entered I. If σ_cr exceeds σy, yielding governs. Code resistance factors and inelastic buckling are not applied.
+ - Douglas Fir limit stress: timber has no yield point. The preset uses 49.9 MPa, the clear-wood compressive strength parallel to grain at 12 % moisture content ([USDA Wood Handbook](https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr190/chapter_05.pdf), coast Douglas-fir). Graded lumber design values are much lower, so edit this for your grade and design code.
++- Douglas Fir density: the preset uses 540 kg/m³, from the specific gravity 0.48 at 12 % moisture content (same source) × 1.12 for the water × 1000 kg/m³ ≈ 538, rounded. Timber density varies widely; enter your own value if you know it.
+ 
+ ## Licence
+ 
+diff --git a/index.html b/index.html
+index 1334487..839e9c7 100644
+--- a/index.html
++++ b/index.html
+@@ -73,10 +73,10 @@
+         <div id="materialsList" class="list"></div>
+         <div class="row">
+           <select id="selAddMaterial" class="select grow">
+-            <option value="steel">Structural Steel (E 200 GPa, σy 250 MPa)</option>
+-            <option value="aluminum">6061-T6 Aluminum (E 68.9 GPa, σy 276 MPa)</option>
+-            <option value="fir">Douglas Fir Timber (E 11 GPa)</option>
+-            <option value="custom">Custom material</option>
++            <option value="steel">Structural Steel (E 200 GPa, σy 250 MPa, ρ 7850 kg/m³)</option>
++            <option value="aluminum">6061-T6 Aluminum (E 68.9 GPa, σy 276 MPa, ρ 2700 kg/m³)</option>
++            <option value="fir">Douglas Fir Timber (E 11 GPa, ρ 540 kg/m³)</option>
++            <option value="custom">Custom material (no density until you enter one)</option>
+           </select>
+           <button class="btn sm" id="btnAddMaterial">+ Add</button>
+         </div>
+@@ -122,6 +122,10 @@
+           <input type="text" id="txtCaseName" class="txt grow" aria-label="Name of the active load case" maxlength="80">
+           <button class="btn sm danger" id="btnDeleteCase" title="Delete the active load case (Ctrl+Z undoes it)">Delete</button>
+         </div>
++        <div class="row">
++          <button class="btn sm" id="btnAddSelfWeight" title="Add the generated self-weight case: each member’s weight W = ρ·A·L·g, half at each end node">+ Self-weight case</button>
++        </div>
++        <p class="note" id="selfWeightNote" hidden>Generated: each member weighs W = ρ·A·L·g (density × section area × length × 9.80665 m/s²), and half of it acts downward at each end node. Recalculated whenever the geometry, a section or a material changes; loads cannot be entered here.</p>
+         <div class="field-label">Load factor λ <span class="hint-i" title="λ multiplies every action in the active load case: nodal loads and prescribed support settlements alike. λ = 0 means no actions, so a stable structure has no displacements, member forces or reactions. A mechanism stays unstable at any λ.">i</span></div>
+         <div class="row">
+           <input type="range" id="rngLoadFactor" min="0" max="3" step="0.01" value="1" class="grow">
+@@ -328,6 +332,7 @@
+           <li><b>Stability verification before solving</b>: zero-stiffness DOFs are detected, K<sub>ff</sub> is Jacobi-equilibrated to K̃ = D<sup>−½</sup>K<sub>ff</sub>D<sup>−½</sup>, and a rank-revealing (pivoted) Cholesky factorisation tests positive definiteness. A rank deficiency means a mechanism. The solve is then refused and the mechanism mode shape is animated. The Maxwell count m + r − 2j, the determinant (log form, so it cannot overflow), and the 1-norm condition number κ₁ are reported.</li>
+           <li><b>Solver</b>: LU decomposition with partial pivoting, followed by iterative refinement whose residuals are computed with error-free transformations (Dot2) at about twice double precision.</li>
+           <li><b>Load cases and λ</b>: every action, nodal force or prescribed settlement, belongs to a load case, and the active case is analysed. The load factor λ multiplies all of its actions: {F} → λ{F} and {u<sub>s</sub>} → λ{u<sub>s</sub>}. The model is linear, so u(λ) = λ·u(1), and member forces and reactions scale the same way. At λ = 0 there are no actions: a stable structure has no displacements, member forces or reactions, while a mechanism stays unstable at any λ.</li>
++          <li><b>Self-weight</b> (the generated case, added with <i>+ Self-weight case</i>): each member weighs W = ρ·A·L·g, with ρ its material's density in kg/m³ (set under Materials; a material without one adds no weight, and a warning says so), A its section area, L its length and g = 9.80665 m/s². For a pin-ended member, the end reactions of its own uniform weight are W/2 at each end, so W/2 is applied downward (−y) at each end node: the truss stays axial-only, and the member's own bending under its weight is not modelled. The loads are never stored: they are computed from the current geometry, sections and materials, so they change with every edit, are scaled by λ like any load, and cannot be edited by hand. The case is solved on its own, like every other case.</li>
+           <li>Reactions: {R} = [K]{u} − λ{F}, where {u} holds λ{u<sub>s</sub>} at the restrained DOFs. Member force: F = (EA/L)[(u₂ − u₁)c + (v₂ − v₁)s]. σ = F/A, ε = ΔL/L.</li>
+           <li>Checks: SF<sub>yield</sub> = σ<sub>y</sub>/|σ|. For compression members SF<sub>buckling</sub> = P<sub>cr</sub>/|F| with P<sub>cr</sub> = π²EI/L². The governing SF is the smaller one. Status is Yielded or Buckled when SF &lt; 1.</li>
+           <li>Verification: global equilibrium ΣF<sub>x</sub>, ΣF<sub>y</sub>, ΣM, and nodal equilibrium rebuilt from the member forces, are reported in the health panel and the solver log.</li>
+diff --git a/model.js b/model.js
+index 35ee068..f3a985c 100644
+--- a/model.js
++++ b/model.js
+@@ -82,11 +82,17 @@
+   /* =====================================================================
+    * 2. Materials, sections, model objects
+    * ===================================================================== */
++  /**
++   * Densities ρ in kg/m³ (self-weight, milestone 4): structural steel 7850 and 6061-T6 aluminium 2700, the usual
++   * values; coast Douglas fir 540, from its specific gravity 0.48 at 12 % moisture content (USDA Wood Handbook, the
++   * source of its strength) × 1.12 for the water it holds × 1000 kg/m³ = 538, rounded. A custom material has no
++   * density until the user enters one: an invented value would give a wrong self-weight without any warning.
++   */
+   const MATERIAL_PRESETS = {
+-    steel: { name: 'Structural Steel', E: 200e9, fy: 250e6, color: '#94a3b8' },
+-    aluminum: { name: '6061-T6 Aluminum', E: 68.9e9, fy: 276e6, color: '#cbd5e1' },
+-    fir: { name: 'Douglas Fir Timber', E: 11e9, fy: 49.9e6, color: '#d6a86b' },
+-    custom: { name: 'Custom material', E: 100e9, fy: 200e6, color: '#a78bfa' },
++    steel: { name: 'Structural Steel', E: 200e9, fy: 250e6, density: 7850, color: '#94a3b8' },
++    aluminum: { name: '6061-T6 Aluminum', E: 68.9e9, fy: 276e6, density: 2700, color: '#cbd5e1' },
++    fir: { name: 'Douglas Fir Timber', E: 11e9, fy: 49.9e6, density: 540, color: '#d6a86b' },
++    custom: { name: 'Custom material', E: 100e9, fy: 200e6, density: null, color: '#a78bfa' },
+   };
+   const FIR_NOTE = 'Timber has no yield point: the limit is the clear-wood compressive strength ∥ grain, 12% MC (USDA Wood Handbook, coast Douglas-fir). Graded-lumber design values are much lower.';
+   const GROUP_COLORS = ['#38bdf8', '#f472b6', '#a3e635', '#fb923c', '#c084fc', '#2dd4bf', '#facc15', '#f87171', '#60a5fa', '#e879f9'];
+@@ -128,7 +134,7 @@
+   const newUid = () => uidSeq++;
+   function makeMaterial(key, over) {
+     const p = MATERIAL_PRESETS[key] || MATERIAL_PRESETS.custom;
+-    return Object.assign({ uid: newUid(), preset: MATERIAL_PRESETS[key] ? key : 'custom', name: p.name, E: p.E, fy: p.fy, color: p.color }, over || {});
++    return Object.assign({ uid: newUid(), preset: MATERIAL_PRESETS[key] ? key : 'custom', name: p.name, E: p.E, fy: p.fy, density: p.density, color: p.color }, over || {});
+   }
+   function makeGroup(name, material, shape, color, A, I) {
+     const g = { uid: newUid(), name, material, shape: Object.assign({ type: 'custom' }, shape || {}), color: color || GROUP_COLORS[0], A: A || 0, I: I || 0 };
+@@ -140,9 +146,12 @@
+     return { uid: newUid(), x, y, support: { type: 'none', angle: 0, fixX: false, fixY: false } };
+   }
+   const makeMember = (n1, n2, group) => ({ uid: newUid(), n1, n2, group });
+-  /** A load case: nodal loads { fx, fy } (N) and prescribed settlements { dx, dy } (m), keyed by node. */
++  /**
++   * A load case: nodal loads { fx, fy } (N) and prescribed settlements { dx, dy } (m), keyed by node. `generated` is
++   * null for a case the user fills, or SELF_WEIGHT for the generated self-weight case, whose Maps stay empty.
++   */
+   function makeLoadCase(name) {
+-    return { uid: newUid(), name: name || 'Load case 1', loads: new Map(), settlements: new Map() };
++    return { uid: newUid(), name: name || 'Load case 1', generated: null, loads: new Map(), settlements: new Map() };
+   }
+   function emptyModel(title) {
+     const steel = makeMaterial('steel'), alu = makeMaterial('aluminum'), fir = makeMaterial('fir');
+@@ -190,25 +199,85 @@
+ 
+   /* ---------- load cases: nodal loads and prescribed settlements ---------- */
+   const caseOf = (model, lc) => lc || model.activeCase;
+-  /** Nodal load { fx, fy } in N on `node` in load case `lc` (default: the active case). */
++
++  /* ---------- self-weight (milestone 4): a generated dead-load case ---------- */
++  /** Standard gravity in m/s² (the conventional value, exact by definition), used in W = ρ·A·L·g. */
++  const GRAVITY = 9.80665;
++  /** The `generated` value of the self-weight load case. */
++  const SELF_WEIGHT = 'self-weight';
++  /** A density that can be used: a finite number of kg/m³, 0 or more. Anything else means "not set". */
++  const validDensity = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
++  const isGeneratedCase = (lc) => !!lc && lc.generated === SELF_WEIGHT;
++  /**
++   * The weight of one member and what it is made of: W = ρ·A·L·g in N, with ρ the density of its section's material
++   * (kg/m³), A the section area (m²), L = hypot(Δx, Δy) its length (m) and g = GRAVITY (m/s²). When the material has
++   * no density, `density` is null and W is 0.
++   */
++  function memberSelfWeight(member) {
++    const d = member.group.material.density, density = validDensity(d) ? d : null;
++    const A = member.group.A, L = Math.hypot(member.n2.x - member.n1.x, member.n2.y - member.n1.y);
++    return { density, A, L, g: GRAVITY, W: density === null ? 0 : density * A * L * GRAVITY };
++  }
++  /**
++   * The nodal loads of the self-weight case, computed now from the current geometry, sections and materials. They
++   * are never stored, so they cannot go stale or add up when recomputed. Each member's weight W acts downward (−y),
++   * half at each end node: the statically equivalent end loads of a pin-ended member's uniform weight. Members whose
++   * material has no density add nothing. Returns Map(node → { fx: 0, fy }) with non-zero entries only.
++   */
++  function selfWeightLoads(model) {
++    const out = new Map();
++    for (const e of model.members) {
++      const half = memberSelfWeight(e).W / 2;
++      if (!(half > 0)) continue;
++      for (const n of [e.n1, e.n2]) {
++        const v = out.get(n);
++        out.set(n, { fx: 0, fy: (v ? v.fy : 0) - half });
++      }
++    }
++    return out;
++  }
++  /** The loads of a load case (default: the active one): its own entries, or for the self-weight case those computed now. */
++  function caseLoads(model, lc) {
++    const c = caseOf(model, lc);
++    return isGeneratedCase(c) ? selfWeightLoads(model) : c.loads;
++  }
++  const selfWeightCase = (model) => model.loadCases.find(isGeneratedCase) || null;
++  /** Adds the generated self-weight case, which does not become active. A model has at most one: if it already has it, that one is returned. */
++  function addSelfWeightCase(model, name) {
++    const have = selfWeightCase(model);
++    if (have) return have;
++    const lc = makeLoadCase(name || 'Self-weight');
++    lc.generated = SELF_WEIGHT;
++    model.loadCases.push(lc);
++    return lc;
++  }
++
++  /** Nodal load { fx, fy } in N on `node` in load case `lc` (default: the active case); generated in the self-weight case. */
+   function nodeLoad(model, node, lc) {
+-    const v = caseOf(model, lc).loads.get(node);
++    const v = caseLoads(model, lc).get(node);
+     return v ? { fx: v.fx, fy: v.fy } : { fx: 0, fy: 0 };
+   }
+-  /** Sets a nodal load; a zero load removes the entry. */
++  /** Sets a nodal load; a zero load removes the entry. Returns false, changing nothing, in the generated self-weight case. */
+   function setNodeLoad(model, node, fx, fy, lc) {
+-    const m = caseOf(model, lc).loads;
+-    if (fx === 0 && fy === 0) m.delete(node); else m.set(node, { fx, fy });
++    const c = caseOf(model, lc);
++    if (isGeneratedCase(c)) return false;
++    if (fx === 0 && fy === 0) c.loads.delete(node); else c.loads.set(node, { fx, fy });
++    return true;
+   }
+   /** Prescribed settlement { dx, dy } in m along the support frame axes x′, y′ (rotated by the support angle). */
+   function nodeSettlement(model, node, lc) {
+     const v = caseOf(model, lc).settlements.get(node);
+     return v ? { dx: v.dx, dy: v.dy } : { dx: 0, dy: 0 };
+   }
+-  /** Sets a prescribed settlement; zero removes the entry. A value on an axis that is not fixed is kept but has no effect. */
++  /**
++   * Sets a prescribed settlement; zero removes the entry. A value on an axis that is not fixed is kept but has no
++   * effect. Returns false, changing nothing, in the generated self-weight case (it holds no settlements).
++   */
+   function setNodeSettlement(model, node, dx, dy, lc) {
+-    const m = caseOf(model, lc).settlements;
+-    if (dx === 0 && dy === 0) m.delete(node); else m.set(node, { dx, dy });
++    const c = caseOf(model, lc);
++    if (isGeneratedCase(c)) return false;
++    if (dx === 0 && dy === 0) c.settlements.delete(node); else c.settlements.set(node, { dx, dy });
++    return true;
+   }
+   function nextCaseName(model) {
+     const names = new Set(model.loadCases.map((c) => c.name));
+@@ -256,11 +325,14 @@
+       format: 'trusslab-model', version: FORMAT_VERSION,
+       units: { length: 'm', force: 'N', stress: 'Pa', area: 'm^2', inertia: 'm^4', angle: 'deg' },
+       title: model.title,
+-      materials: model.materials.map((m, i) => ({ id: i + 1, name: m.name, preset: m.preset, E: m.E, fy: m.fy, color: m.color })),
++      materials: model.materials.map((m, i) => ({ id: i + 1, name: m.name, preset: m.preset, E: m.E, fy: m.fy, density: validDensity(m.density) ? m.density : null, color: m.color })),
+       sections: model.groups.map((g, i) => ({ id: i + 1, name: g.name, material: mi.get(g.material), A: g.A, I: g.I, shape: Object.assign({}, g.shape), color: g.color })),
+       nodes: model.nodes.map((n, i) => ({ id: i + 1, x: n.x, y: n.y, support: { type: n.support.type, angle: n.support.angle, fixX: n.support.fixX, fixY: n.support.fixY } })),
+       members: model.members.map((e, i) => ({ id: i + 1, n1: ni.get(e.n1), n2: ni.get(e.n2), section: gi.get(e.group) })),
+-      loadCases: model.loadCases.map((lc, i) => ({ id: i + 1, name: lc.name, loads: entries(lc.loads, 'fx', 'fy'), settlements: entries(lc.settlements, 'dx', 'dy') })),
++      // the self-weight case is written as generated, without loads: they are computed again from the members when read
++      loadCases: model.loadCases.map((lc, i) => (isGeneratedCase(lc)
++        ? { id: i + 1, name: lc.name, generated: SELF_WEIGHT, loads: [], settlements: [] }
++        : { id: i + 1, name: lc.name, loads: entries(lc.loads, 'fx', 'fy'), settlements: entries(lc.settlements, 'dx', 'dy') })),
+       activeLoadCase: model.loadCases.indexOf(model.activeCase) + 1,
+     };
+   }
+@@ -281,7 +353,7 @@
+     if (!Array.isArray(obj.nodes) || !Array.isArray(obj.members)) throw new Error('missing "nodes" or "members" arrays');
+     const fromVersion = Number(obj.version) === 2 ? 2 : 1;
+     const notes = [];
+-    const model = readStructure(obj);
++    const model = readStructure(obj, notes);
+     if (fromVersion === 2) readLoadCasesV2(obj, model, notes); else migrateV1(obj, model, notes);
+     return { model, fromVersion, notes };
+   }
+@@ -300,12 +372,12 @@
+   }
+ 
+   /** Materials, sections, nodes (geometry and support restraints), members and title: the same in both versions. */
+-  function readStructure(obj) {
++  function readStructure(obj, notes) {
+     const matsIn = Array.isArray(obj.materials) && obj.materials.length ? obj.materials : [{ preset: 'steel' }];
+-    const materials = matsIn.map((m) => {
++    const materials = matsIn.map((m, i) => {
+       const key = MATERIAL_PRESETS[m.preset] ? m.preset : 'custom', p = MATERIAL_PRESETS[key];
+-      const E = fin(m.E, p.E), fy = fin(m.fy, p.fy);
+-      return makeMaterial(key, { name: String(m.name || p.name).slice(0, 80), E: E > 0 ? E : p.E, fy: fy > 0 ? fy : p.fy, color: /^#[0-9a-f]{6}$/i.test(m.color) ? m.color : p.color });
++      const E = fin(m.E, p.E), fy = fin(m.fy, p.fy), name = String(m.name || p.name).slice(0, 80);
++      return makeMaterial(key, { name, E: E > 0 ? E : p.E, fy: fy > 0 ? fy : p.fy, density: readDensity(m.density, i, name, notes), color: /^#[0-9a-f]{6}$/i.test(m.color) ? m.color : p.color });
+     });
+     const secIn = Array.isArray(obj.sections) ? obj.sections : Array.isArray(obj.groups) ? obj.groups : [];
+     const groups = secIn.map((g, i) => {
+@@ -340,6 +412,19 @@
+     return { title: String(obj.title || 'Imported truss').slice(0, 120), nodes, members, materials, groups, loadCases: [lc], activeCase: lc };
+   }
+ 
++  /**
++   * A material's density from a file. Missing or null means not set: files written before milestone 4 have none,
++   * and the preset is not used to fill it in, because the material may have been changed since. A number of
++   * kg/m³, 0 or more (or a string holding one), is kept; anything else is not set either, and a note says so.
++   */
++  function readDensity(v, i, name, notes) {
++    if (v === undefined || v === null) return null;
++    const d = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? +v : NaN;
++    if (validDensity(d)) return d;
++    notes.push({ msg: `Material ${i + 1} ("${name}"): the density ${JSON.stringify(v).slice(0, 40)} is not a number of kg/m³ (0 or more), so it is not set, and its members carry no self-weight until one is entered.` });
++    return null;
++  }
++
+   /**
+    * Version 1 -> version 2: node.load becomes a load in "Load case 1"; a custom support's dx, dy becomes a
+    * settlement there, in the same support frame x′, y′ (kept even on an axis that is not fixed, where it has
+@@ -381,6 +466,16 @@
+     model.loadCases = list.map((c, k) => {
+       const name = typeof c.name === 'string' && c.name.trim() ? c.name.trim().slice(0, 80) : `Load case ${k + 1}`;
+       const lc = makeLoadCase(name);
++      if (c.generated === SELF_WEIGHT) {
++        // generated: the loads are computed from the members, so anything stored with the case is not used
++        lc.generated = SELF_WEIGHT;
++        const stored = [c.loads, c.settlements].some((x) => x !== undefined && !(Array.isArray(x) && x.length === 0));
++        if (stored) notes.push({ msg: `"${name}" is the generated self-weight case: its loads are computed from the members, so the loads or settlements stored with it were not applied.` });
++        return lc;
++      }
++      if (c.generated !== undefined && c.generated !== null) {
++        notes.push({ msg: `"${name}" says it is generated (${JSON.stringify(c.generated).slice(0, 40)}), which this version of TrussLab cannot generate, so it was read as an ordinary load case.` });
++      }
+       readEntries(c.loads, 'fx', 'fy', lc.loads, model, notes, `"${name}", loads`);
+       readEntries(c.settlements, 'dx', 'dy', lc.settlements, model, notes, `"${name}", settlements`);
+       return lc;
+@@ -410,8 +505,9 @@
+ 
+   /**
+    * Model checks that the solver does not make. Returns warnings { msg, ref } for: a custom support with no
+-   * fixed axis (it provides no restraint), a settlement on an axis that is not fixed, and a settlement on a
+-   * node that no member connects (both have no effect).
++   * fixed axis (it provides no restraint), a settlement on an axis that is not fixed, a settlement on a
++   * node that no member connects (both have no effect), and, when there is a self-weight case, a material
++   * without density used by members (they carry no weight).
+    */
+   function validateModel(model) {
+     const warnings = [];
+@@ -434,6 +530,15 @@
+         if (free.length) warnings.push({ msg: `Node ${i + 1}: the settlement along ${free.join(' and ')} in "${lc.name}" has no effect, because ${free.join(' and ')} ${free.length > 1 ? 'are' : 'is'} not fixed.`, ref });
+       });
+     });
++    const sw = selfWeightCase(model);
++    if (sw) {
++      const without = new Map();
++      model.members.forEach((e) => { const mat = e.group.material; if (!validDensity(mat.density)) without.set(mat, (without.get(mat) || 0) + 1); });
++      model.materials.forEach((mat) => {
++        const k = without.get(mat);
++        if (k) warnings.push({ msg: `Material "${mat.name}" has no density, so ${k > 1 ? `its ${k} members carry` : 'its member carries'} no weight in "${sw.name}".` });
++      });
++    }
+     return warnings;
+   }
+ 
+@@ -586,12 +691,13 @@
+     const o = opts || {};
+     const lf = o.loadFactor === undefined ? 1 : o.loadFactor;
+     const lc = o.loadCase || model.activeCase;
++    const loads = caseLoads(model, lc); // for the self-weight case, computed now from the members
+     const idx = new Map(model.nodes.map((n, i) => [n, i]));
+     const options = {};
+     if (o.targetSF !== undefined) options.targetSF = o.targetSF;
+     return {
+       nodes: model.nodes.map((n) => {
+-        const L = lc.loads.get(n) || ZERO_LOAD, S = lc.settlements.get(n) || ZERO_SETTLEMENT, r = supportRestraint(n.support);
++        const L = loads.get(n) || ZERO_LOAD, S = lc.settlements.get(n) || ZERO_SETTLEMENT, r = supportRestraint(n.support);
+         return { x: n.x, y: n.y, fx: L.fx * lf, fy: L.fy * lf, fixX: r.fixX, fixY: r.fixY, angle: r.angle, dx: r.fixX ? S.dx * lf : 0, dy: r.fixY ? S.dy * lf : 0 };
+       }),
+       members: model.members.map((e) => ({ i: idx.get(e.n1), j: idx.get(e.n2), E: e.group.material.E, A: e.group.A, I: e.group.I, fy: e.group.material.fy })),
+@@ -749,7 +855,9 @@
+     SUPPORT_TYPES, SUPPORT_SHORT, setSupport, supportRestraint,
+     // load cases: nodal loads and prescribed settlements
+     makeLoadCase, addLoadCase, removeLoadCase, setActiveLoadCase, removeNodeActions,
+-    nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement,
++    nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement, caseLoads,
++    // self-weight: material density and the generated dead-load case
++    GRAVITY, SELF_WEIGHT, validDensity, isGeneratedCase, memberSelfWeight, selfWeightLoads, selfWeightCase, addSelfWeightCase,
+     // file format version 2 (reads version 1 too) and model checks
+     FORMAT_VERSION, serialize, readModel, deserialize, validateModel,
+     // example structures
+diff --git a/script.js b/script.js
+index 4ab3282..2baf6ff 100644
+--- a/script.js
++++ b/script.js
+@@ -35,6 +35,7 @@
+     SUPPORT_TYPES, SUPPORT_SHORT, setSupport, supportRestraint, serialize, readModel, deserialize, validateModel,
+     EXAMPLES, buildExample, toAnalysisInput,
+     addLoadCase, removeLoadCase, setActiveLoadCase, removeNodeActions, nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement,
++    GRAVITY, validDensity, isGeneratedCase, memberSelfWeight, selfWeightCase, addSelfWeightCase,
+     SESSION_KEYS, SMOKE_SESSION_KEYS, loadStoredSession, saveStoredSession,
+   } = TrussModel;
+ 
+@@ -825,7 +826,7 @@
+     const r = info.r;
+     const lines = [];
+     if (info.mode === 'deformed') lines.push(`<b>Deflection ×${fmt(state.s.scale, 4)}</b> · dashed = undeformed`);
+-    if (state.model.loadCases.length > 1) lines.push(`Load case: <b>${esc(state.model.activeCase.name)}</b>`);
++    if (state.model.loadCases.length > 1) lines.push(`Load case: <b>${esc(state.model.activeCase.name)}</b>${isGeneratedCase(state.model.activeCase) ? ' (generated)' : ''}`);
+     if (state.s.loadFactor !== 1) lines.push(`<b>Load factor λ = ${fmt(state.s.loadFactor, 4)}</b>`);
+     if (r && r.ok) lines.push(`δmax ${fD(r.summary.maxDisp.value)} ${state.s.dispUnit} · SFmin ${fmt(r.summary.minSF.value, 3)}`);
+     const html = lines.join('<br>');
+@@ -1020,9 +1021,16 @@
+     selectOnly('node', n);
+     modelChanged();
+   }
++  /** True, after a message, when the active case is the generated self-weight case: no loads or settlements go into it. */
++  function refuseGenerated() {
++    const lc = state.model.activeCase;
++    if (!isGeneratedCase(lc)) return false;
++    toast(`“${lc.name}” is generated from the members’ weight, so loads and settlements cannot be entered in it. Choose another load case`, 'warn');
++    return true;
++  }
+   function downLoad(sx, sy) {
+     const n = pickNode(sx, sy, 10);
+-    if (!n) return;
++    if (!n || refuseGenerated()) return;
+     pushUndo();
+     const t = state.loadTool, cur = nodeLoad(state.model, n); // the active load case
+     if (t.mode === 'clear') setNodeLoad(state.model, n, 0, 0);
+@@ -1300,10 +1308,14 @@
+   /** Load-case controls (Analysis section): the active case, its name, and adding or deleting cases. */
+   function renderLoadCases() {
+     const m = state.model, sel = $('#selLoadCase'), name = $('#txtCaseName');
+-    sel.innerHTML = m.loadCases.map((c, i) => `<option value="${i}">${esc(c.name)}</option>`).join('');
++    sel.innerHTML = m.loadCases.map((c, i) => `<option value="${i}">${esc(c.name)}${isGeneratedCase(c) ? ' (generated)' : ''}</option>`).join('');
+     sel.value = String(m.loadCases.indexOf(m.activeCase));
+     if (document.activeElement !== name) name.value = m.activeCase.name;
+     $('#btnDeleteCase').disabled = m.loadCases.length <= 1;
++    const sw = $('#btnAddSelfWeight'), has = !!selfWeightCase(m);
++    sw.disabled = has;
++    sw.title = has ? 'This model already has its self-weight case' : 'Add the generated self-weight case: each member’s weight W = ρ·A·L·g, half at each end node';
++    $('#selfWeightNote').hidden = !isGeneratedCase(m.activeCase);
+   }
+   function bindLoadCases() {
+     $('#selLoadCase').addEventListener('change', (e) => {
+@@ -1320,6 +1332,14 @@
+       modelChanged();
+       toast(`Added “${state.model.activeCase.name}”. Loads and settlements you apply now go into it`, 'ok');
+     });
++    $('#btnAddSelfWeight').addEventListener('click', () => {
++      if (selfWeightCase(state.model)) return;
++      pushUndo();
++      setActiveLoadCase(state.model, addSelfWeightCase(state.model));
++      renderLoadCases();
++      modelChanged();
++      toast(`Added “${state.model.activeCase.name}”, generated from the members: W = ρ·A·L·g each, half at each end node`, 'ok');
++    });
+     const name = $('#txtCaseName');
+     name.addEventListener('change', () => {
+       const v = name.value.trim().slice(0, 80);
+@@ -1355,6 +1375,7 @@
+         <div class="mat-props">
+           <label>E <input class="num" data-mf="E" value="${inVal(m.E / GPA)}" title="Young's modulus, GPa"><span class="u">GPa</span></label>
+           <label>σ<sub>y</sub> <input class="num" data-mf="fy" value="${inVal(m.fy / MPA)}" title="Yield / limit stress, MPa"><span class="u">MPa</span></label>
++          <label>ρ <input class="num" data-mf="density" value="${validDensity(m.density) ? inVal(m.density) : ''}" placeholder="not set" title="Density for self-weight, kg/m³ (steel 7850, aluminium 2700, Douglas fir about 540). Empty means not set: members of this material then carry no self-weight."><span class="u">kg/m³</span></label>
+         </div>
+         ${m.preset === 'fir' ? `<div class="mat-note">${esc(FIR_NOTE)}</div>` : ''}
+       </div>`).join('');
+@@ -1375,6 +1396,17 @@
+         el.addEventListener('change', () => {
+           if (f === 'name') { pushUndo(); m.name = el.value.trim().slice(0, 80) || 'Material'; modelChanged({ materials: true, groups: true }); return; }
+           if (f === 'color') { m.color = el.value; scheduleSave(); return; }
++          if (f === 'density') { // kg/m³; empty means not set (no self-weight), never an invented value
++            const t = el.value.trim(), d = t === '' ? null : evalNum(t);
++            if (d !== null && !validDensity(d)) { el.classList.add('invalid'); toast('Density must be a number of kg/m³, 0 or more, or empty for not set', 'bad'); return; }
++            el.classList.remove('invalid');
++            el.value = d === null ? '' : inVal(d);
++            if (d === (validDensity(m.density) ? m.density : null)) return;
++            pushUndo();
++            m.density = d;
++            modelChanged({ groups: true });
++            return;
++          }
+           const v = evalNum(el.value);
+           if (!(v > 0)) { el.classList.add('invalid'); toast(`${f === 'E' ? 'E' : 'σy'} must be a positive number`, 'bad'); return; }
+           el.classList.remove('invalid');
+@@ -1605,6 +1637,15 @@
+     const settle = axes.length ? `<div class="sub-h">Settlement in “${caseName}” (before λ)</div><div class="form-grid">${axes.map(([f, ax, fixed, v]) =>
+       `<label>δ along ${ax}</label><div class="inline">${numIn(f, v / dU(), fixed ? 'title="Prescribed displacement along this support axis"' : 'title="This axis is not fixed, so this settlement has no effect"')}<span class="u">${du}</span></div>`).join('')}</div>` : '';
+     const warn = nodeWarnings(n).map((w) => `<p class="note warn-note">${esc(w.msg)}</p>`).join('');
++    const gen = isGeneratedCase(state.model.activeCase);
++    const loadPart = gen ? selfWeightNodeText(n, L, caseName) : `
++      <div class="sub-h">Nodal load in “${caseName}” (before λ)</div>
++      <div class="form-grid">
++        <label>F<sub>x</sub></label><div class="inline">${numIn('fx', L.fx / fU())}<span class="u">${fu}</span></div>
++        <label>F<sub>y</sub></label><div class="inline">${numIn('fy', L.fy / fU())}<span class="u">${fu}</span></div>
++        <label>|F|</label><div class="inline">${numIn('fmag', F / fU())}<span class="u">${fu}</span></div>
++        <label>Direction</label><div class="inline">${numIn('fang', ang, 'title="Degrees CCW from +x (−90 = downward)"')}<span class="u">°</span></div>
++      </div>`;
+     return `
+       <div class="ins-title"><h4>Node N${nodeNo(n)}<small>${esc(nodeSupportText(n))}</small></h4><button class="btn sm danger" data-act="del">Delete</button></div>
+       <div class="sub-h">Coordinates</div>
+@@ -1613,16 +1654,18 @@
+         <label>Y</label><div class="inline">${numIn('y', n.y, 'title="Expressions allowed, e.g. 2.5*sqrt(3)"')}<span class="u">m</span></div>
+       </div>
+       <div class="sub-h">Support / boundary condition</div>
+-      <div class="form-grid">${sup}</div>${warn}${settle}
+-      <div class="sub-h">Nodal load in “${caseName}” (before λ)</div>
+-      <div class="form-grid">
+-        <label>F<sub>x</sub></label><div class="inline">${numIn('fx', L.fx / fU())}<span class="u">${fu}</span></div>
+-        <label>F<sub>y</sub></label><div class="inline">${numIn('fy', L.fy / fU())}<span class="u">${fu}</span></div>
+-        <label>|F|</label><div class="inline">${numIn('fmag', F / fU())}<span class="u">${fu}</span></div>
+-        <label>Direction</label><div class="inline">${numIn('fang', ang, 'title="Degrees CCW from +x (−90 = downward)"')}<span class="u">°</span></div>
+-      </div>
++      <div class="form-grid">${sup}</div>${warn}${gen ? '' : settle}${loadPart}
+       <div class="sub-h">Results</div><div id="insResults"></div>`;
+   }
++  /** The node's load in the generated self-weight case, read-only, with where it comes from. */
++  function selfWeightNodeText(n, L, caseName) {
++    const fu = state.s.forceUnit;
++    const parts = state.model.members.filter((e) => e.n1 === n || e.n2 === n)
++      .map((e) => { const w = memberSelfWeight(e); return w.density === null ? `M${memberNo(e)} none (no density)` : `M${memberNo(e)} ${fF(w.W / 2)}`; });
++    return `<div class="sub-h">Self-weight load in “${caseName}” (generated, before λ)</div>
++      <div class="form-grid"><label>F<sub>y</sub></label><div class="inline"><span>${fF(L.fy)}</span><span class="u">${fu}</span></div></div>
++      <p class="note">${parts.length ? `Half the weight of each member at this node, acting downward: ${parts.join(', ')} ${fu}.` : 'No member is connected to this node, so it carries no self-weight.'} Recalculated whenever the geometry, a section or a material changes. Loads cannot be entered in this case.</p>`;
++  }
+   function memberForm(e) {
+     return `
+       <div class="ins-title"><h4>Member M${memberNo(e)}<small>N${nodeNo(e.n1)} → N${nodeNo(e.n2)}</small></h4>
+@@ -1631,9 +1674,17 @@
+         <label>Start node</label><div class="inline"><input class="num" data-f="n1" value="${nodeNo(e.n1)}"></div>
+         <label>End node</label><div class="inline"><input class="num" data-f="n2" value="${nodeNo(e.n2)}"></div>
+         <label>Section</label><select class="select" data-f="grp">${state.model.groups.map((g, i) => `<option value="${i}" ${g === e.group ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
+-      </div>
++      </div>${selfWeightCase(state.model) ? memberSelfWeightText(e) : ''}
+       <div id="insResults"></div>`;
+   }
++  /** A member's weight with the numbers it comes from (shown when the model has a self-weight case). */
++  function memberSelfWeightText(e) {
++    const w = memberSelfWeight(e), fu = state.s.forceUnit, mat = e.group.material;
++    if (w.density === null) return `<div class="sub-h">Self-weight</div><p class="note warn-note">“${esc(mat.name)}” has no density, so this member carries no self-weight. Enter its density ρ under Materials.</p>`;
++    return `<div class="sub-h">Self-weight</div>
++      <p class="note">W = ρ·A·L·g = ${fmt(w.density)} kg/m³ × ${fmt(w.A / MM2)} mm² × ${fmt(w.L)} m × ${GRAVITY} m/s² = ${fF(w.W)} ${fu}.
++      Half of it, ${fF(w.W / 2)} ${fu}, acts downward at each end node (N${nodeNo(e.n1)} and N${nodeNo(e.n2)}): for a pin-ended member these are the end reactions of its own uniform weight, so the truss carries it as nodal loads (the member's own bending is not modelled).</p>`;
++  }
+   function multiForm(ns, ms) {
+     const fu = state.s.forceUnit;
+     let h = `<div class="ins-title"><h4>Multiple selection<small>${plural(ns.length, 'node')}, ${plural(ms.length, 'member')}</small></h4><button class="btn sm danger" data-act="del">Delete all</button></div>`;
+@@ -1642,9 +1693,9 @@
+         <div class="form-grid">
+           <label>Support</label><div class="inline"><select class="select" data-m="stype">${SUPPORT_TYPES.filter(([k]) => k !== 'custom').map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
+           <label>Angle α</label><div class="inline"><input class="num" data-m="sangle" value="30"><span class="u">°</span><button class="btn sm" data-act="mm-support">Apply</button></div>
+-          <label>Load case</label><div class="inline"><span class="dim">${esc(state.model.activeCase.name)}</span></div>
+-          <label>F<sub>x</sub></label><div class="inline"><input class="num" data-m="fx" value="0"><span class="u">${fu}</span></div>
+-          <label>F<sub>y</sub></label><div class="inline"><input class="num" data-m="fy" value="${inVal(-10e3 / fU())}"><span class="u">${fu}</span><button class="btn sm" data-act="mm-load">Apply</button></div>
++          <label>Load case</label><div class="inline"><span class="dim">${esc(state.model.activeCase.name)}${isGeneratedCase(state.model.activeCase) ? ' (generated: no loads can be entered)' : ''}</span></div>
++          ${isGeneratedCase(state.model.activeCase) ? '' : `<label>F<sub>x</sub></label><div class="inline"><input class="num" data-m="fx" value="0"><span class="u">${fu}</span></div>
++          <label>F<sub>y</sub></label><div class="inline"><input class="num" data-m="fy" value="${inVal(-10e3 / fU())}"><span class="u">${fu}</span><button class="btn sm" data-act="mm-load">Apply</button></div>`}
+         </div>`;
+     }
+     if (ms.length) {
+@@ -1708,6 +1759,7 @@
+       if (dup && dup !== e) { el.classList.add('invalid'); toast('Those nodes are already connected', 'warn'); return; }
+       pushUndo(); e[f] = nn; modelChanged(); return;
+     }
++    if (['fx', 'fy', 'fmag', 'fang', 'sdx', 'sdy'].includes(f) && refuseGenerated()) return;
+     pushUndo();
+     switch (f) {
+       case 'x': n.x = v; break;
+@@ -1747,6 +1799,7 @@
+       pushUndo(); ns.forEach((n) => setSupport(n, q('stype').value, ang));
+       toast(`Support applied to ${plural(ns.length, 'node')}`, 'ok'); modelChanged();
+     } else if (act === 'mm-load') {
++      if (refuseGenerated()) return;
+       const fx = readNum(q('fx')), fy = readNum(q('fy')); if (fx === null || fy === null) return;
+       pushUndo(); ns.forEach((n) => setNodeLoad(state.model, n, fx * fU(), fy * fU()));
+       toast(`Load applied to ${plural(ns.length, 'node')}`, 'ok'); modelChanged();
+@@ -1910,6 +1963,12 @@
+       <div class="lg-keys"><span><i style="background:#ef4444"></i>Compression</span><span><i style="background:#3b82f6"></i>Tension</span><span><i style="background:#6b7280"></i>Zero</span></div>`;
+     lg.hidden = false;
+   }
++  /** The health report's explanation of the generated self-weight case: where its loads come from and when they change. */
++  function selfWeightBlock() {
++    let total = 0, counted = 0;
++    state.model.members.forEach((e) => { const w = memberSelfWeight(e); if (w.density !== null) { total += w.W; counted++; } });
++    return `<div class="sub-h">Self-weight (generated)</div><p class="note">Each member weighs W = ρ·A·L·g: its material's density, its section area, its length, and g = ${GRAVITY} m/s². Half of W acts downward at each end node. Total ${fF(total)} ${state.s.forceUnit} from ${plural(counted, 'member')}, before λ. Recalculated whenever the geometry, a section or a material changes.</p>`;
++  }
+   function renderHealth() {
+     const box = $('#health');
+     const r = state.res, fu = state.s.forceUnit, du = state.s.dispUnit;
+@@ -1954,6 +2013,7 @@
+       <dt>Members</dt><dd>${c.tension} T · ${c.compression} C · ${c.zero} zero</dd>
+       <dt>Status</dt><dd>${c.safe} safe · <span class="${c.yielded ? 'check-bad' : ''}">${c.yielded} yielded</span> · <span class="${c.buckled ? 'check-bad' : ''}">${c.buckled} buckled</span></dd>
+     </dl>`;
++    if (isGeneratedCase(state.model.activeCase)) h += selfWeightBlock();
+     h += `<div class="sub-h">Buckling risk <span style="text-transform:none">(P<sub>cr</sub>/|F| &lt; ${fmt(Math.max(state.s.targetSF, 1), 3)})</span></div>`;
+     if (sm.bucklingRisk.length) {
+       h += `<ul class="risk-list">${sm.bucklingRisk.slice(0, 12).map((b) => {
+@@ -2270,7 +2330,7 @@
+     const inp = toAnalysisInput(M, { loadFactor: r.loadFactor });
+     const obj = {
+       meta: { app: 'TrussLab 2D Truss FEA & Load Simulator', solver: FEA.VERSION, generated: new Date().toISOString(), units: 'SI base units: m, N, Pa, m^2, m^4; angles in degrees',
+-        loadCase: { id: M.loadCases.indexOf(M.activeCase) + 1, name: M.activeCase.name }, loadFactor: r.loadFactor, loadFactorScales: 'nodal loads and prescribed settlements', targetSF: state.s.targetSF },
++        loadCase: Object.assign({ id: M.loadCases.indexOf(M.activeCase) + 1, name: M.activeCase.name }, isGeneratedCase(M.activeCase) ? { generated: 'self-weight', selfWeight: 'W = rho*A*L*g per member, W/2 downward at each end node', g: GRAVITY } : {}), loadFactor: r.loadFactor, loadFactorScales: 'nodal loads and prescribed settlements', targetSF: state.s.targetSF },
+       model: serialize(M),
+       status: r.ok ? 'solved' : r.mechanism ? 'unstable' : 'invalid',
+       errors: r.errors.map((e) => e.msg), warnings: validateModel(M).map((w) => w.msg).concat(r.warnings.map((w) => w.msg)),
+diff --git a/test/browser-smoke.js b/test/browser-smoke.js
+index bf6751f..06fd878 100644
+--- a/test/browser-smoke.js
++++ b/test/browser-smoke.js
+@@ -588,6 +588,66 @@
+       after.ok && after.nodes[1].uy === -5 * 1e-3 && sameResults(before, after));
+   });
+ 
++  scenario('Self-weight: a generated load case, W = ρ·A·L·g with half at each end node, recalculated after every change', async () => {
++    await loadExample('aframe'); // two 5 m steel bars, A = 1000 mm²: each weighs 7850 · 0.001 · 5 · 9.80665 = 384.9110125 N
++    const g = 9.80665, cases = () => model().loadCases, active = () => model().activeLoadCase;
++    const sumRy = (r) => r.nodes.reduce((t, n) => t + n.ry, 0);
++    const total = () => { // Σ ρ·A·L·g from the model on screen
++      const f = model();
++      return f.members.reduce((t, e) => {
++        const a = f.nodes[e.n1 - 1], b = f.nodes[e.n2 - 1], sec = f.sections[e.section - 1];
++        return t + f.materials[sec.material - 1].density * sec.A * Math.hypot(b.x - a.x, b.y - a.y) * g;
++      }, 0);
++    };
++    must('one load case, no self-weight case yet, and "+ Self-weight case" is enabled', cases().length === 1 && !el('#btnAddSelfWeight').disabled && el('#selfWeightNote').hidden);
++    const mi = model().sections[model().members[0].section - 1].material - 1, densitySel = `#materialsList .mat-card[data-mi="${mi}"] [data-mf="density"]`;
++    must('the material card shows the steel density, 7850 kg/m³', !!el(densitySel) && el(densitySel).value === '7850');
++    const before = T.results();
++    press('#btnAddSelfWeight'); await settle();
++    check('the button adds a generated case named "Self-weight" and makes it active; the button is then disabled',
++      cases().length === 2 && cases()[1].generated === 'self-weight' && cases()[1].name === 'Self-weight' && active() === 2 && el('#btnAddSelfWeight').disabled);
++    check('the case list marks it as generated, and a note explains it', /Self-weight \(generated\)/.test(el('#selLoadCase').innerHTML) && !el('#selfWeightNote').hidden);
++    check('no loads are stored with it: they are computed from the members', cases()[1].loads.length === 0 && cases()[1].settlements.length === 0);
++    near('the reactions carry the whole weight: ΣR_y = 2 × 384.9110125 N', sumRy(T.results()), 2 * 384.9110125, 1e-12);
++    near('... and each rafter carries −W / (2 sin θ) = −240.569382813 N from the apex load W', T.results().members[0].force, -384.9110125 / 1.6, 1e-12);
++    check('the health report says where the loads come from', /Self-weight \(generated\)/.test(text('#health')) && /ρ·A·L·g/.test(text('#health')));
++    key('l'); setValue('#toFx', '0'); setValue('#toFy', '-10'); setValue('#toLoadMode', 'set');
++    const stored = JSON.stringify(cases());
++    await click(3, 4);
++    check('the Load tool puts nothing into the generated case', JSON.stringify(cases()) === stored && cases()[1].loads.length === 0);
++    key('v');
++    await click(3, 4);
++    check('the Inspector shows the apex load read-only, with where it comes from, and no load fields',
++      /Self-weight load in/.test(text('#inspector')) && /Half the weight of each member/.test(text('#inspector')) && !/data-f="(fx|fy|fmag|fang|sdx|sdy)"/.test(el('#inspector').innerHTML));
++    must('the apex Y field is shown', !!el('#inspector [data-f="y"]'));
++    setValue('#inspector [data-f="y"]', '8'); await settle(); // geometry: both bars become √73 m long
++    near('moving the apex recalculates the weight: ΣR_y = Σρ·A·L·g with the new lengths', sumRy(T.results()), total(), 1e-12);
++    near('... which is 2 · 7850 · 0.001 · √73 · g', total(), 2 * 7850 * 0.001 * Math.sqrt(73) * g, 1e-12);
++    ctrl('z'); await settle();
++    near('Ctrl+Z moves it back, and the weight with it', sumRy(T.results()), 2 * 384.9110125, 1e-12);
++    setValue(densitySel, '15700'); await settle();
++    near('doubling the steel density doubles the self-weight (recalculated at once)', sumRy(T.results()), 4 * 384.9110125, 1e-12);
++    ctrl('z'); await settle();
++    check('Ctrl+Z restores the density', el(densitySel).value === '7850' && Math.abs(sumRy(T.results()) / (2 * 384.9110125) - 1) < 1e-12);
++    setValue('#numLoadFactor', '2'); await settle();
++    near('λ = 2 doubles the self-weight reactions', sumRy(T.results()), 4 * 384.9110125, 1e-12);
++    setValue('#numLoadFactor', '1'); await settle();
++    await click(1.5, 2);
++    check('selecting a member shows its weight with the numbers: W = ρ·A·L·g = 7850 kg/m³ × 1000 mm² × 5 m × 9.80665 m/s²',
++      /W = ρ·A·L·g/.test(text('#inspector')) && /7850 kg\/m³/.test(text('#inspector')) && /9\.80665 m\/s²/.test(text('#inspector')));
++    setValue('#selLoadCase', '0'); await settle();
++    check('"Load case 1" is unchanged: the same 100 kN apex load and exactly the same results as before',
++      active() === 1 && cases()[0].loads[0].fy === -100000 && T.results().members.every((m, i) => m.force === before.members[i].force) && el('#selfWeightNote').hidden);
++    T.saveNow();
++    const rr = T.reloadStoredSession(); await settle();
++    check('after saving and reloading the session the case is still generated, and nothing was stored with it',
++      rr.restored && cases().length === 2 && cases()[1].generated === 'self-weight' && cases()[1].loads.length === 0);
++    setValue('#selLoadCase', '1'); await settle();
++    near('... and it gives the same self-weight results', sumRy(T.results()), 2 * 384.9110125, 1e-12);
++    press('#btnDeleteCase'); await settle();
++    check('deleting it leaves "Load case 1", and the button is enabled again', cases().length === 1 && active() === 1 && !el('#btnAddSelfWeight').disabled);
++  });
++
+   scenario('Opening version 1 files: the λ notice appears only with a settlement, and stays dismissed', async () => {
+     if (typeof DataTransfer !== 'function') { skip('opening files', 'this browser cannot build a file list (no DataTransfer)'); return; }
+     must('the notice is hidden to start with', el('#updateNotice').hidden);
+diff --git a/test/model.test.js b/test/model.test.js
+index df83f0b..9b52172 100644
+--- a/test/model.test.js
++++ b/test/model.test.js
+@@ -58,7 +58,8 @@ testCase('Loading and API', () => {
+     'sectionProps', 'makeMaterial', 'makeGroup', 'makeNode', 'makeMember', 'emptyModel', 'SUPPORT_TYPES', 'SUPPORT_SHORT', 'setSupport',
+     'supportRestraint', 'makeLoadCase', 'addLoadCase', 'removeLoadCase', 'setActiveLoadCase', 'removeNodeActions', 'nodeLoad', 'setNodeLoad',
+     'nodeSettlement', 'setNodeSettlement', 'modelHasSettlement', 'FORMAT_VERSION', 'serialize', 'readModel', 'deserialize', 'validateModel',
+-    'EXAMPLES', 'buildExample', 'toAnalysisInput', 'SESSION_KEYS', 'SMOKE_SESSION_KEYS', 'loadStoredSession', 'saveStoredSession', 'backupUnreadable'];
++    'EXAMPLES', 'buildExample', 'toAnalysisInput', 'SESSION_KEYS', 'SMOKE_SESSION_KEYS', 'loadStoredSession', 'saveStoredSession', 'backupUnreadable',
++    'caseLoads', 'GRAVITY', 'SELF_WEIGHT', 'validDensity', 'isGeneratedCase', 'memberSelfWeight', 'selfWeightLoads', 'selfWeightCase', 'addSelfWeightCase'];
+   const missing = want.filter((k) => !(k in TM));
+   check('TrussModel exports the whole model API', missing.length === 0, `missing ${missing.join(', ')}`);
+   check('model.js loaded and works with no DOM present', typeof document === 'undefined' && typeof TM.buildExample('aframe') === 'object');
+@@ -788,6 +789,252 @@ testCase('Import notes are kept with the saved session', () => {
+   check('notes that are not a list are ignored; the session still loads', L.source === 'v2' && L.notes.length === 0);
+ });
+ 
++/* ---------- milestone 4: material density and the generated self-weight case ---------- */
++// Hand references below use g = 9.80665 m/s² (standard gravity), W = ρ·A·L·g, and W/2 downward at each end node.
++const G = 9.80665;
++// A statically determinate test truss: A (0, 0) pin, B (6, 0) roller (uy = 0), apex C (3, 4); AC and BC are 5 m long, AB 6 m.
++// AC: steel 7850 kg/m³, 2000 mm²: W = 7850 · 0.002 · 5 · g = 78.5 g = 769.822025 N
++// BC: aluminium 2700 kg/m³, 1000 mm²: W = 2700 · 0.001 · 5 · g = 13.5 g = 132.389775 N
++// AB: Douglas fir 540 kg/m³, 10000 mm²: W = 540 · 0.01 · 6 · g = 32.4 g = 317.73546 N
++const W_AC = 769.822025, W_BC = 132.389775, W_AB = 317.73546;
++function swTruss() {
++  const m = TM.emptyModel('Self-weight test');
++  const [steel, alu, fir] = m.materials;
++  const gS = TM.makeGroup('Steel 2000 mm²', steel, { type: 'custom' }, null, 2000 * TM.MM2, 2e6 * TM.MM4);
++  const gA = TM.makeGroup('Aluminium 1000 mm²', alu, { type: 'custom' }, null, 1000 * TM.MM2, 1e6 * TM.MM4);
++  const gF = TM.makeGroup('Fir 10000 mm²', fir, { type: 'custom' }, null, 10000 * TM.MM2, 8e6 * TM.MM4);
++  m.groups = [gS, gA, gF];
++  const A = TM.makeNode(0, 0), B = TM.makeNode(6, 0), C = TM.makeNode(3, 4);
++  TM.setSupport(A, 'pin'); TM.setSupport(B, 'rollerX');
++  m.nodes.push(A, B, C);
++  m.members.push(TM.makeMember(A, C, gS), TM.makeMember(B, C, gA), TM.makeMember(A, B, gF));
++  return { m, A, B, C, gS, gA, gF, steel, alu, fir };
++}
++const fyOf = (m, n, lc) => TM.nodeLoad(m, n, lc).fy;
++// the code adds the half weights at a node one member at a time, so compare with the hand sums to a relative 1e-14
++const nearly = (x, want) => Math.abs(x / want - 1) < 1e-14;
++const loadsJSON = (m, lc) => JSON.stringify(m.nodes.map((n) => TM.nodeLoad(m, n, lc)));
++
++testCase('Material density (kg/m³)', () => {
++  same('preset densities: steel 7850, aluminium 2700, Douglas fir 540; a custom material has none',
++    ['steel', 'aluminum', 'fir', 'custom'].map((k) => TM.MATERIAL_PRESETS[k].density), [7850, 2700, 540, null]);
++  same('makeMaterial takes the preset density; a custom or unknown material starts with no density, not an invented one',
++    [TM.makeMaterial('steel').density, TM.makeMaterial('fir').density, TM.makeMaterial('custom').density, TM.makeMaterial('unobtainium').density], [7850, 540, null, null]);
++  same('a usable density is a finite number, 0 or more', [7850, 0, -1, NaN, Infinity, '7850', null, undefined].map(TM.validDensity), [true, true, false, false, false, false, false, false]);
++  const f = TM.serialize(TM.emptyModel());
++  same('it is written with each material, in kg/m³', f.materials.map((x) => x.density), [7850, 2700, 540]);
++  same('material fields in a file', Object.keys(f.materials[0]), ['id', 'name', 'preset', 'E', 'fy', 'density', 'color']);
++  const withCustom = TM.emptyModel(); withCustom.materials.push(TM.makeMaterial('custom'));
++  check('a material without density is written as null', TM.serialize(withCustom).materials[3].density === null);
++  const read = (density) => { const g = copy(f); g.materials[0].density = density; if (density === undefined) delete g.materials[0].density; return TM.readModel(g); };
++  const r0 = read(undefined);
++  check('a file without densities (version 2 before milestone 4) reads as "not set", even for a steel preset, and without a note',
++    r0.model.materials[0].density === null && r0.notes.length === 0);
++  check('... and so does every version 1 file', TM.readModel(copy(V1_FILE)).model.materials.every((x) => x.density === null));
++  same('a density of 0 is kept (a weightless material), and a number written as text is read', [read(0).model.materials[0].density, read('7850').model.materials[0].density], [0, 7850]);
++  for (const bad of [-1, 'abc', true, {}, '1e999']) {
++    const r = read(bad);
++    check(`an invalid density (${JSON.stringify(bad)}) is not set, and a note says so`, r.model.materials[0].density === null && r.notes.length === 1 && /density .* is not a number of kg\/m³/.test(r.notes[0].msg), JSON.stringify(r.notes));
++  }
++});
++
++testCase('Self-weight of one member: W = ρ·A·L·g, half to each end node (closed form)', () => {
++  check('g is standard gravity, 9.80665 m/s²', TM.GRAVITY === 9.80665 && TM.SELF_WEIGHT === 'self-weight');
++  const m = TM.emptyModel(), steel = m.materials[0], g = m.groups[0]; // steel, A = 2000 mm²
++  const a = TM.makeNode(0, 0), b = TM.makeNode(4, 0);
++  m.nodes.push(a, b); m.members.push(TM.makeMember(a, b, g));
++  const w = TM.memberSelfWeight(m.members[0]);
++  same('the member: ρ 7850 kg/m³, A 2000 mm² = 0.002 m², L 4 m, g 9.80665 m/s²', [w.density, w.A, w.L, w.g], [7850, 2000 * TM.MM2, 4, 9.80665]);
++  near('W = 7850 · 0.002 · 4 · 9.80665 = 615.85762 N', w.W, 615.85762, 1e-14);
++  const sw = TM.addSelfWeightCase(m), L = TM.selfWeightLoads(m);
++  near('end 1 carries W/2 = 307.92881 N downward', L.get(a).fy, -307.92881, 1e-14);
++  check('end 2 carries exactly the same', L.get(b).fy === L.get(a).fy);
++  check('and nothing horizontal: the load is along −y (gravity)', L.get(a).fx === 0 && L.get(b).fx === 0);
++  same('nodeLoad reads the same values in the self-weight case', [TM.nodeLoad(m, a, sw), TM.nodeLoad(m, b, sw)], [L.get(a), L.get(b)]);
++  // a sloped member: 3-4-5 triangle, aluminium 1000 mm²: W = 2700 · 0.001 · 5 · g = 132.389775 N, still purely vertical
++  const alu = m.materials[1], gA = TM.makeGroup('a', alu, { type: 'custom' }, null, 1000 * TM.MM2, 1e6 * TM.MM4);
++  const c = TM.makeNode(10, 0), d = TM.makeNode(13, 4);
++  m.groups.push(gA); m.nodes.push(c, d); m.members.push(TM.makeMember(c, d, gA));
++  near('a sloped member: L = hypot(3, 4) = 5 m', TM.memberSelfWeight(m.members[1]).L, 5, 1e-15);
++  near('W = 2700 · 0.001 · 5 · 9.80665 = 132.389775 N', TM.memberSelfWeight(m.members[1]).W, 132.389775, 1e-14);
++  check('... and its end loads are still vertical, W/2 each', TM.nodeLoad(m, c, sw).fx === 0 && Math.abs(TM.nodeLoad(m, d, sw).fy / -66.1948875 - 1) < 1e-14 && TM.nodeLoad(m, c, sw).fy === TM.nodeLoad(m, d, sw).fy);
++  // units: kg/m³ · m² · m · m/s² = kg·m/s² = N. One cubic metre of steel: 7850 · 9.80665 = 76982.2025 N (unit weight 76.98 kN/m³)
++  const u = TM.emptyModel(), p = TM.makeNode(0, 0), q = TM.makeNode(0, 1), cube = TM.makeGroup('1 m²', u.materials[0], { type: 'custom' }, null, 1, 1);
++  u.groups = [cube]; u.nodes.push(p, q); u.members.push(TM.makeMember(p, q, cube));
++  near('units: 1 m of a 1 m² steel bar weighs 76982.2025 N, steel\'s unit weight of 76.98 kN/m³', TM.memberSelfWeight(u.members[0]).W, 76982.2025, 1e-14);
++  near('... and a section entered in mm² gives the same weight per m² (2000 mm² = 0.002 m²)', TM.memberSelfWeight(m.members[0]).W / (2000 * TM.MM2 * 4), 76982.2025, 1e-14);
++});
++
++testCase('Self-weight of members with different lengths, areas and densities sharing nodes (closed form)', () => {
++  const { m, A, B, C } = swTruss();
++  const sw = TM.addSelfWeightCase(m);
++  near('member AC (steel, 2000 mm², 5 m): 769.822025 N', TM.memberSelfWeight(m.members[0]).W, W_AC, 1e-14);
++  near('member BC (aluminium, 1000 mm², 5 m): 132.389775 N', TM.memberSelfWeight(m.members[1]).W, W_BC, 1e-14);
++  near('member AB (fir, 10000 mm², 6 m): 317.73546 N', TM.memberSelfWeight(m.members[2]).W, W_AB, 1e-14);
++  near('node A gets half of AC and half of AB: −543.7787425 N', fyOf(m, A, sw), -(W_AC + W_AB) / 2, 1e-14);
++  near('node B gets half of BC and half of AB: −225.0626175 N', fyOf(m, B, sw), -(W_BC + W_AB) / 2, 1e-14);
++  near('node C gets half of AC and half of BC: −451.1059 N', fyOf(m, C, sw), -(W_AC + W_BC) / 2, 1e-14);
++  near('the end loads add up to the total weight, 1219.94726 N', -(fyOf(m, A, sw) + fyOf(m, B, sw) + fyOf(m, C, sw)), W_AC + W_BC + W_AB, 1e-14);
++  // statics: only the apex load P = 451.1059 N loads the members (A and B are supports); sin θ = 4/5, cos θ = 3/5
++  const P = (W_AC + W_BC) / 2, r = analyse(m, { loadFactor: 1, loadCase: sw });
++  check('the self-weight case solves', r.ok);
++  near('AC carries −P / (2 sin θ) = −281.9411875 N (compression)', r.members[0].force, -P / 1.6, 1e-12);
++  near('BC carries the same', r.members[1].force, -P / 1.6, 1e-12);
++  near('the tie AB carries P / (2 tan θ) = 169.1647125 N (tension)', r.members[2].force, P * 3 / 8, 1e-12);
++  near('reaction at A: 543.7787425 + P/2 = 769.3316925 N', r.nodes[0].ry, (W_AC + W_AB) / 2 + P / 2, 1e-12);
++  near('reaction at B: 225.0626175 + P/2 = 450.6155675 N', r.nodes[1].ry, (W_BC + W_AB) / 2 + P / 2, 1e-12);
++  check('no horizontal reaction (gravity only)', Math.abs(r.nodes[0].rx) < 1e-9 * (W_AC + W_BC + W_AB), `${r.nodes[0].rx}`);
++});
++
++testCase('Self-weight with zero, missing and invalid densities', () => {
++  const { m, A, B, C, fir, steel } = swTruss();
++  const sw = TM.addSelfWeightCase(m);
++  fir.density = 0;
++  check('density 0: the fir tie AB weighs nothing, and the other members are unchanged',
++    TM.memberSelfWeight(m.members[2]).W === 0 && Math.abs(fyOf(m, A, sw) / (-W_AC / 2) - 1) < 1e-14 && Math.abs(fyOf(m, B, sw) / (-W_BC / 2) - 1) < 1e-14);
++  check('... and no warning: 0 is a value the user chose', !TM.validateModel(m).some((w) => /density/.test(w.msg)));
++  fir.density = null;
++  const w0 = TM.memberSelfWeight(m.members[2]);
++  check('no density (null): density reported as null, W = 0, the tie adds nothing', w0.density === null && w0.W === 0 && Math.abs(fyOf(m, A, sw) / (-W_AC / 2) - 1) < 1e-14);
++  same('... and a warning names the material', TM.validateModel(m).map((w) => w.msg), ['Material "Douglas Fir Timber" has no density, so its member carries no weight in "Self-weight".']);
++  for (const bad of [NaN, -5, Infinity, '7850']) {
++    steel.density = bad;
++    check(`an invalid density in memory (${String(bad)}) counts as none: AC adds nothing`, TM.memberSelfWeight(m.members[0]).W === 0 && nearly(fyOf(m, C, sw), -W_BC / 2));
++  }
++  steel.density = null;
++  check('with neither steel nor fir weighing anything, only the aluminium member loads its ends', TM.selfWeightLoads(m).size === 2 && !TM.selfWeightLoads(m).has(A));
++  same('two materials without density, two warnings (members counted)', TM.validateModel(m).map((w) => w.msg),
++    ['Material "Structural Steel" has no density, so its member carries no weight in "Self-weight".', 'Material "Douglas Fir Timber" has no density, so its member carries no weight in "Self-weight".']);
++  TM.removeLoadCase(m, sw);
++  check('without a self-weight case, a missing density is not a warning', TM.validateModel(m).length === 0);
++  const empty = TM.emptyModel(); TM.addSelfWeightCase(empty);
++  check('a model without members has no self-weight loads', TM.selfWeightLoads(empty).size === 0);
++});
++
++testCase('Self-weight is recalculated after every change and never adds up', () => {
++  const { m, A, B, C, gS, gF, steel } = swTruss();
++  const sw = TM.addSelfWeightCase(m), first = loadsJSON(m, sw);
++  C.y = 8; // geometry: AC and BC become √73 m long
++  near('after moving the apex to (3, 8): C carries (7850 · 0.002 + 2700 · 0.001) · √73 · g / 2', fyOf(m, C, sw), -(7850 * 0.002 + 2700 * 0.001) * Math.sqrt(73) * G / 2, 1e-14);
++  C.y = 4;
++  gS.A = 4000 * TM.MM2; // section: AC twice as heavy
++  near('after doubling the area of AC: A carries (2 · 769.822025 + 317.73546) / 2', fyOf(m, A, sw), -(2 * W_AC + W_AB) / 2, 1e-14);
++  gS.A = 2000 * TM.MM2;
++  steel.density = 2 * 7850; // material
++  near('after doubling the density of steel: C carries (2 · 769.822025 + 132.389775) / 2', fyOf(m, C, sw), -(2 * W_AC + W_BC) / 2, 1e-14);
++  steel.density = 7850;
++  m.members[2].group = gS; // the tie AB is now steel 2000 mm²: 7850 · 0.002 · 6 · g = 94.2 g = 923.78643 N
++  near('after giving AB another section: B carries (132.389775 + 923.78643) / 2', fyOf(m, B, sw), -(W_BC + 923.78643) / 2, 1e-14);
++  m.members[2].group = gF;
++  const bc = m.members.splice(1, 1)[0]; // deleting BC
++  near('after deleting BC: C carries only half of AC', fyOf(m, C, sw), -W_AC / 2, 1e-14);
++  m.members.splice(1, 0, bc);
++  check('after undoing every change, the loads are exactly the first ones again', loadsJSON(m, sw) === first);
++  const runs = [1, 2, 3, 4, 5].map(() => JSON.stringify([...TM.selfWeightLoads(m)].map(([n, v]) => [m.nodes.indexOf(n), v])));
++  check('computing them five times gives five identical results', runs.every((x) => x === runs[0]));
++  const inputs = [1, 2, 3].map(() => JSON.stringify(TM.toAnalysisInput(m, { loadFactor: 1, loadCase: sw })));
++  check('building the solver input three times gives identical input', inputs.every((x) => x === inputs[0]));
++  check('nothing is stored in the case: its Maps stay empty', sw.loads.size === 0 && sw.settlements.size === 0);
++  let text = JSON.stringify(TM.serialize(m));
++  for (let k = 0; k < 3; k++) {
++    const back = TM.readModel(JSON.parse(text)).model, again = JSON.stringify(TM.serialize(back));
++    check(`save and read cycle ${k + 1}: identical file, the same loads, nothing added`, again === text && loadsJSON(back, back.loadCases[1]) === first);
++    text = again;
++  }
++});
++
++testCase('The self-weight case is separate from the load cases the user fills', () => {
++  const { m, A, C } = swTruss();
++  const lc1 = m.loadCases[0];
++  TM.setNodeLoad(m, C, 1000, -10000);
++  const before = analyse(m), loads1 = loadsJSON(m, lc1);
++  const sw = TM.addSelfWeightCase(m);
++  check('adding it appends one case, named "Self-weight", marked generated, and does not make it active',
++    m.loadCases.length === 2 && m.loadCases[1] === sw && sw.name === 'Self-weight' && TM.isGeneratedCase(sw) && !TM.isGeneratedCase(lc1) && m.activeCase === lc1 && TM.selfWeightCase(m) === sw);
++  check('adding it again returns the same case: a model has at most one', TM.addSelfWeightCase(m) === sw && m.loadCases.length === 2);
++  const after = analyse(m);
++  check('"Load case 1" keeps its loads and its results exactly', loadsJSON(m, lc1) === loads1 &&
++    after.members.every((x, i) => Object.is(x.force, before.members[i].force)) && after.nodes.every((n, i) => Object.is(n.uy, before.nodes[i].uy)));
++  check('a load cannot be put into the self-weight case (setNodeLoad refuses and changes nothing)', TM.setNodeLoad(m, C, 5, 5, sw) === false && sw.loads.size === 0 && nearly(fyOf(m, C, sw), -(W_AC + W_BC) / 2));
++  check('nor a settlement', TM.setNodeSettlement(m, A, 0, -0.01, sw) === false && sw.settlements.size === 0);
++  check('setNodeLoad still works, and says so, in an ordinary case', TM.setNodeLoad(m, A, 0, -1, lc1) === true && TM.nodeLoad(m, A, lc1).fy === -1);
++  TM.setNodeLoad(m, A, 0, 0, lc1);
++  check('the active case reads its own loads; the self-weight case reads the generated ones',
++    JSON.stringify(TM.nodeLoad(m, C)) === '{"fx":1000,"fy":-10000}' && TM.nodeLoad(m, C, sw).fx === 0 && nearly(TM.nodeLoad(m, C, sw).fy, -(W_AC + W_BC) / 2));
++  const in1 = TM.toAnalysisInput(m, { loadFactor: 1 }), inS = TM.toAnalysisInput(m, { loadFactor: 1, loadCase: sw });
++  check('the solver input of each case holds only its own loads', in1.nodes[2].fy === -10000 && in1.nodes[0].fy === 0 && inS.nodes[2].fx === 0 && nearly(inS.nodes[0].fy, -(W_AC + W_AB) / 2));
++  TM.setNodeLoad(m, C, 0, -20000);
++  check('editing "Load case 1" does not change the self-weight loads', nearly(fyOf(m, C, sw), -(W_AC + W_BC) / 2));
++  TM.setActiveLoadCase(m, sw);
++  check('the self-weight case can be the active case, and nodeLoad then reads it', m.activeCase === sw && nearly(fyOf(m, C), -(W_AC + W_BC) / 2));
++  check('deleting it leaves "Load case 1" active, with its loads', TM.removeLoadCase(m, sw) && m.activeCase === lc1 && m.loadCases.length === 1 && TM.nodeLoad(m, C).fy === -20000);
++});
++
++testCase('The self-weight case is saved, read and restored', () => {
++  const { m, C } = swTruss();
++  const sw = TM.addSelfWeightCase(m);
++  TM.setNodeLoad(m, C, 0, -10000);
++  const f = TM.serialize(m);
++  same('it is written as generated, by name, without loads or settlements (they are computed again when read)',
++    f.loadCases[1], { id: 2, name: 'Self-weight', generated: 'self-weight', loads: [], settlements: [] });
++  check('an ordinary case has no "generated" field', !('generated' in f.loadCases[0]));
++  const r = TM.readModel(copy(f));
++  check('reading it back: the case is generated again, with no notes', TM.isGeneratedCase(r.model.loadCases[1]) && !TM.isGeneratedCase(r.model.loadCases[0]) && r.notes.length === 0);
++  check('... its loads are the same as before saving', loadsJSON(r.model, r.model.loadCases[1]) === loadsJSON(m, sw));
++  check('... and the round trip is exact', JSON.stringify(TM.serialize(r.model)) === JSON.stringify(f));
++  TM.setActiveLoadCase(m, sw);
++  const ra = TM.readModel(TM.serialize(m)).model;
++  check('when it is the active case, it is active again after reading', ra.activeCase === ra.loadCases[1] && TM.isGeneratedCase(ra.activeCase));
++  const edited = copy(f); edited.loadCases[1].loads = [{ node: 3, fx: 0, fy: -1 }];
++  const re = TM.readModel(edited);
++  check('loads stored with the generated case (an edited file) are not applied, the generated ones are used, and a note says so',
++    re.notes.length === 1 && /generated self-weight case/.test(re.notes[0].msg) && nearly(fyOf(re.model, re.model.nodes[2], re.model.loadCases[1]), -(W_AC + W_BC) / 2));
++  const unknown = copy(f); unknown.loadCases[0].generated = 'wind';
++  const ru = TM.readModel(unknown);
++  check('a case marked generated by a kind this version does not know is read as an ordinary case, with its loads, and a note',
++    !TM.isGeneratedCase(ru.model.loadCases[0]) && TM.nodeLoad(ru.model, ru.model.nodes[2], ru.model.loadCases[0]).fy === -10000 && ru.notes.length === 1 && /cannot generate/.test(ru.notes[0].msg));
++  const K = TM.SESSION_KEYS, st = fakeStorage();
++  const sv = TM.saveStoredSession(st, K, { model: m, settings: { grid: 1 }, view: { zoom: 3 } }, { migrationPending: false, corruptV2: null });
++  const L = TM.loadStoredSession(st, K);
++  check('an autosaved session keeps it: saved and verified, then restored as the active generated case with the same loads',
++    sv.saved && L.source === 'v2' && TM.isGeneratedCase(L.model.activeCase) && loadsJSON(L.model, L.model.activeCase) === loadsJSON(m, sw) && L.notes.length === 0);
++  check('... with the material densities', JSON.stringify(L.model.materials.map((x) => x.density)) === JSON.stringify(m.materials.map((x) => x.density)));
++  const undoText = JSON.stringify({ model: TM.serialize(m) }), undone = TM.deserialize(JSON.parse(undoText).model);
++  check('an undo snapshot (the serialised model) restores it too', TM.isGeneratedCase(undone.loadCases[1]) && loadsJSON(undone, undone.loadCases[1]) === loadsJSON(m, sw));
++});
++
++testCase('Self-weight and the load factor λ', () => {
++  const { m, C } = swTruss();
++  const sw = TM.addSelfWeightCase(m);
++  const in1 = TM.toAnalysisInput(m, { loadFactor: 1, loadCase: sw }), in2 = TM.toAnalysisInput(m, { loadFactor: 2, loadCase: sw });
++  check('λ = 2 doubles every generated load', in2.nodes.every((n, i) => n.fy === 2 * in1.nodes[i].fy && n.fx === 0));
++  const r1 = analyse(m, { loadFactor: 1, loadCase: sw }), r2 = analyse(m, { loadFactor: 2, loadCase: sw }), r0 = analyse(m, { loadFactor: 0, loadCase: sw });
++  closeArray('λ = 2: member forces N(2) = 2·N(1)', r2.members.map((x) => x.force), r1.members.map((x) => 2 * x.force), 1e-12);
++  closeArray('λ = 2: reactions R(2) = 2·R(1)', r2.nodes.map((n) => n.ry), r1.nodes.map((n) => 2 * n.ry), 1e-12);
++  check('λ = 0: no loads, no member forces, no reactions', r0.ok && r0.members.every((x) => x.force === 0) && r0.nodes.every((n) => n.rx === 0 && n.ry === 0));
++  check('λ does not change the stored model: the generated loads at λ = 1 are unchanged afterwards', nearly(fyOf(m, C, sw), -(W_AC + W_BC) / 2));
++});
++
++testCase('Self-weight on the nine examples', () => {
++  for (const [key] of TM.EXAMPLES) {
++    const m = TM.buildExample(key), before = analyse(m);
++    const sw = TM.addSelfWeightCase(m), after = analyse(m);
++    check(`${key}: adding the self-weight case leaves "Load case 1" and its results exactly as they were`, m.activeCase === m.loadCases[0] && before.ok === after.ok &&
++      (!before.ok || (after.members.every((x, i) => Object.is(x.force, before.members[i].force)) && after.nodes.every((n, i) => Object.is(n.ry, before.nodes[i].ry)))));
++    const total = m.members.reduce((t, e) => t + TM.memberSelfWeight(e).W, 0), gen = [...TM.selfWeightLoads(m).values()];
++    check(`${key}: every member has a density, so the total weight is positive, and every generated load is vertical and downward`,
++      total > 0 && m.members.every((e) => TM.memberSelfWeight(e).density > 0) && gen.every((v) => v.fx === 0 && v.fy < 0));
++    near(`${key}: the generated loads add up to the total weight`, -gen.reduce((t, v) => t + v.fy, 0), total, 1e-13);
++    const r = analyse(m, { loadFactor: 1, loadCase: sw });
++    if (key === 'mechanism') { check('mechanism: still unstable under its own weight, so no results', !r.ok); continue; }
++    check(`${key}: the self-weight case solves`, r.ok);
++    near(`${key}: the vertical reactions carry the total weight (ΣR_y = ΣW)`, r.nodes.reduce((t, n) => t + n.ry, 0), total, 1e-10);
++    check(`${key}: no net horizontal reaction`, Math.abs(r.nodes.reduce((t, n) => t + n.rx, 0)) < 1e-9 * total);
++    const f = JSON.stringify(TM.serialize(m));
++    check(`${key}: with the self-weight case, the round trip is exact`, JSON.stringify(TM.serialize(TM.readModel(JSON.parse(f)).model)) === f);
++  }
++});
++
+ testCase('The nine example structures', () => {
+   same('nine examples, in menu order', TM.EXAMPLES.map((e) => e[0]), ['pratt', 'howe', 'warren', 'aframe', 'cantilever', 'fink', 'inclined', 'settlement', 'mechanism']);
+   const empty = TM.buildExample('not-an-example');

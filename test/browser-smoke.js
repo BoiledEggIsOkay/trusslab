@@ -13,9 +13,9 @@
  *   It does not use window.TrussLab, the older hook that exposes internal state.
  *
  * Isolation
- *   - In smoke mode the app reads and writes its own storage key, so the saved session
- *     (trusslab.session.v1) is never loaded or written. The test checks at the end that
- *     it is byte-for-byte unchanged.
+ *   - In smoke mode the app reads and writes its own storage keys, so the user's sessions
+ *     (trusslab.session.v2, trusslab.session.v1 and backups of unreadable sessions) are never
+ *     loaded or written. The test checks at the end that every one is byte-for-byte unchanged.
  *   - The whole application state is captured before the first scenario and restored in a
  *     finally block, whatever happened; pending autosaves are cancelled.
  *   - Each scenario runs in its own try/catch, so one failure does not stop the run.
@@ -151,12 +151,21 @@
   /* ------------------------------------------------------------------ model helpers */
   const model = () => T.model();
   const text = (sel) => el(sel).textContent || '';
+  /** How often the health report lists the import note about the pin settlement in V1_SETTLED_FIXTURE. */
+  const importNoteCount = () => (text('#health').match(/was not applied/g) || []).length;
   const pairs = () => model().members.map((m) => `${Math.min(m.n1, m.n2)}-${Math.max(m.n1, m.n2)}`);
   function memberForce(pair) {
     const i = pairs().indexOf(pair), r = T.results();
     return i >= 0 && r && r.ok ? r.members[i].force : NaN;
   }
   const FORCE_UNIT = { N: 1, kN: 1e3, MN: 1e6 };
+  /** Load { fx, fy } on node index i (0-based) in the active load case, read from the saved format (version 2). */
+  function loadOf(i) {
+    const m = model(), lc = m.loadCases[m.activeLoadCase - 1], e = lc.loads.find((x) => x.node === i + 1);
+    return e ? { fx: e.fx, fy: e.fy } : { fx: 0, fy: 0 };
+  }
+  /** Every user storage key with its value, to prove that the test never touches them. */
+  const userKeysSnapshot = () => JSON.stringify(T.userStorageKeys.map((k) => [k, readStorage(k)]));
   function readStorage(k) {
     try { return localStorage.getItem(k); } catch (e) { return `(storage unavailable: ${e.message})`; }
   }
@@ -202,15 +211,22 @@
     ],
     members: [{ id: 1, n1: 1, n2: 3, section: 1 }, { id: 2, n1: 2, n2: 3, section: 1 }],
   };
+  /** The same in version 1, with node 2 a custom support fixed along y′ that settles 10 mm, a tie 1-2, and a 5 mm
+   *  settlement on the pin at node 1, which version 1 ignored: it is not applied, and an import note says so. */
+  const V1_SETTLED_FIXTURE = Object.assign(JSON.parse(JSON.stringify(V1_FIXTURE)), { title: 'Smoke fixture: format version 1 with a settlement' });
+  V1_SETTLED_FIXTURE.nodes[0].support = { type: 'pin', angle: 0, fixX: true, fixY: true, dx: 0, dy: -0.005 };
+  V1_SETTLED_FIXTURE.nodes[1].support = { type: 'custom', angle: 0, fixX: false, fixY: true, dx: 0, dy: -0.01 };
+  V1_SETTLED_FIXTURE.members.push({ id: 3, n1: 1, n2: 2, section: 1 });
 
   /* ------------------------------------------------------------------ scenarios */
   const scenarios = [];
   const scenario = (name, fn) => scenarios.push({ name, fn });
-  let userSessionBefore = null; // the real saved session, read before the first scenario
+  let userKeysBefore = null; // every user storage key and its value, read before the first scenario
   let savedSession = null;      // written by the autosave scenario, opened by the Open… scenario
 
   scenario('Start-up', async () => {
-    check('smoke mode stores its session under its own key', T.storageKey !== T.userStorageKey, T.storageKey);
+    check('smoke mode stores its sessions under its own keys, never a user key',
+      Object.values(T.storageKeys).every((k) => !T.userStorageKeys.includes(k)) && T.storageKey === T.storageKeys.v2, T.storageKey);
     must('the default example (Pratt truss) is loaded', /^Pratt truss/.test(model().title), `title "${model().title}"`);
     const r = T.results();
     must('the default example is solved', r && r.ok, r ? r.errors[0] : 'no results');
@@ -277,15 +293,15 @@
     setValue('#toFy', '-20');
     setValue('#toLoadMode', 'set');
     await click(3, 0);
-    const n4 = model().nodes[3], unit = FORCE_UNIT[T.settings().forceUnit];
-    check('node 4 now carries Fy = -20 kN', n4.load.fx === 0 && n4.load.fy === -20 * unit, `(${n4.load.fx}, ${n4.load.fy}) N`);
+    const n4 = loadOf(3), unit = FORCE_UNIT[T.settings().forceUnit];
+    check('node 4 now carries Fy = -20 kN in the active load case', n4.fx === 0 && n4.fy === -20 * unit, `(${n4.fx}, ${n4.fy}) N`);
     near('the hanger 3-4 carries +20 kN tension (statics)', memberForce('3-4'), 20e3, 1e-12);
     near('each rafter now carries -75 kN (the 120 kN total is shared)', memberForce('1-3'), -75e3, 1e-12);
     near('member 1-4 stays at zero force', memberForce('1-4'), 0, 1e-6);
   });
 
   scenario('Support tool: a misplaced roller is reported as unstable, then fixed', async () => {
-    must('starting from the loaded hanger model', model().nodes.length === 4 && model().nodes[3].load.fy < 0);
+    must('starting from the loaded hanger model', model().nodes.length === 4 && loadOf(3).fy < 0);
     key('s');
     setValue('#toSupType', 'rollerX');
     await click(6, 0);
@@ -477,6 +493,183 @@
     }
   });
 
+  scenario('Load cases: add, rename, switch and delete; undo keeps the case you are looking at', async () => {
+    await loadExample('aframe');
+    const cases = () => model().loadCases, active = () => model().activeLoadCase;
+    must('one load case to start with, and Delete is disabled', cases().length === 1 && el('#btnDeleteCase').disabled);
+    press('#btnAddCase'); await settle();
+    check('+ New adds "Load case 2" and makes it active', cases().length === 2 && cases()[1].name === 'Load case 2' && active() === 2 && el('#selLoadCase').value === '1');
+    check('the new case is empty: every member is zero-force', T.results().ok && T.results().members.every((m) => m.state === 'zero'));
+    key('l');
+    setValue('#toFx', '0'); setValue('#toFy', '-10'); setValue('#toLoadMode', 'set');
+    await click(3, 4);
+    check('the Load tool writes into the active case only', JSON.stringify(cases()[1].loads) === JSON.stringify([{ node: 3, fx: 0, fy: -10000 }]) && cases()[0].loads[0].fy === -100000);
+    setValue('#txtCaseName', 'Wind'); await settle();
+    check('the name field renames the active case, in the list too', cases()[1].name === 'Wind' && /<option value="1"[^>]*>Wind<\/option>/.test(el('#selLoadCase').innerHTML));
+    const undoBefore = T.history().undo;
+    setValue('#selLoadCase', '0'); await settle();
+    check('switching to case 1 adds no undo step', active() === 1 && T.history().undo === undoBefore);
+    near('case 1 is analysed: -62.5 kN in each rafter', T.results().members[0].force, -62.5e3, 1e-12);
+    ctrl('z'); await settle();
+    check('Ctrl+Z undoes the rename and keeps case 1 active', cases()[1].name === 'Load case 2' && active() === 1, `active ${active()}, name ${cases()[1].name}`);
+    setValue('#selLoadCase', '1'); await settle();
+    ctrl('z'); await settle();
+    check('Ctrl+Z undoes the load in case 2 and keeps case 2 active', active() === 2 && cases()[1].loads.length === 0, `active ${active()}`);
+    ctrl('z'); await settle();
+    check('Ctrl+Z undoes adding case 2: it is gone, so a valid case (case 1) is active', cases().length === 1 && active() === 1);
+    press('#btnAddCase'); await settle();
+    press('#btnDeleteCase'); await settle();
+    check('Delete removes the active case; with one case left Delete is disabled again', cases().length === 1 && el('#btnDeleteCase').disabled);
+    key('v');
+  });
+
+  scenario('λ scales loads and settlements alike; λ = 0 is the zero-action state of a stable structure', async () => {
+    await loadExample('settlement');
+    setValue('#numLoadFactor', '2'); await settle();
+    const r2 = T.results();
+    check('λ = 2: the settled support moves 2 × 10 mm', r2.ok && r2.nodes[4].uy === 2 * -0.01, `uy = ${r2.nodes[4].uy}`);
+    setValue('#numLoadFactor', '0'); await settle();
+    const r0 = T.results();
+    check('λ = 0: no displacements, member forces or reactions', r0.ok && r0.nodes.every((n) => n.ux === 0 && n.uy === 0 && n.rx === 0 && n.ry === 0) && r0.members.every((m) => m.force === 0));
+    await loadExample('mechanism');
+    check('λ = 0 does not make a mechanism stable', !T.results().ok && !!T.results().mechanism && /UNSTABLE/.test(text('#statusPill')));
+    setValue('#numLoadFactor', '1'); await settle();
+  });
+
+  scenario('A custom support that restrains nothing is kept, and warned about', async () => {
+    await loadExample('aframe');
+    key('v');
+    await click(6, 0);
+    must('node 2 is selected', T.selection().nodes.join() === '1');
+    setValue('#inspector [data-f="stype"]', 'custom'); await settle();
+    const s0 = model().nodes[1].support;
+    check('choosing Custom fixes both axes (existing behaviour)', s0.type === 'custom' && s0.fixX && s0.fixY);
+    setChecked('#inspector [data-f="sfixx"]', false); await settle();
+    setChecked('#inspector [data-f="sfixy"]', false); await settle();
+    const s = model().nodes[1].support;
+    check('with both axes cleared the support stays custom and restrains nothing', s.type === 'custom' && s.fixX === false && s.fixY === false);
+    check('the health report warns that it provides no restraint', /provides no restraint/.test(text('#health')));
+    check('the Inspector warns about it too', /provides no restraint/.test(text('#inspector')));
+  });
+
+  scenario('Switching a support to Custom keeps its frame angle, 0° included, and its settlement direction', async () => {
+    must('displacements are entered in mm', T.settings().dispUnit === 'mm');
+    const settlements = () => JSON.stringify(model().loadCases[model().activeLoadCase - 1].settlements);
+    await loadExample('aframe');
+    key('v');
+    await click(0, 0);
+    must('node 1, a pin (α = 0°), is selected', T.selection().nodes.join() === '0' && model().nodes[0].support.type === 'pin');
+    setValue('#inspector [data-f="sdy"]', '-10'); await settle();
+    must('a 10 mm settlement along y′ is entered', settlements() === JSON.stringify([{ node: 1, dx: 0, dy: -10 * 1e-3 }]), settlements());
+    let before = T.results();
+    setValue('#inspector [data-f="stype"]', 'custom'); await settle();
+    let s = model().nodes[0].support, after = T.results();
+    check('pin → Custom: the frame stays at α = 0° (not 30°), with both axes fixed', s.type === 'custom' && s.angle === 0 && s.fixX && s.fixY, `α = ${s.angle}°`);
+    check('... the settlement still acts straight down, u = (0, −10 mm), and every result is unchanged',
+      settlements() === JSON.stringify([{ node: 1, dx: 0, dy: -10 * 1e-3 }]) && after.ok && after.nodes[0].ux === 0 && after.nodes[0].uy === -10 * 1e-3 && sameResults(before, after));
+    await loadExample('inclined');
+    await click(6, 0);
+    must('node 2, the roller on the 30° surface, is selected', T.selection().nodes.join() === '1' && model().nodes[1].support.angle === 30);
+    setValue('#inspector [data-f="sdy"]', '-5'); await settle();
+    before = T.results();
+    setValue('#inspector [data-f="stype"]', 'custom'); await settle();
+    s = model().nodes[1].support; after = T.results();
+    check('inclined roller at 30° → Custom: keeps α = 30° and the same fixed axis (y′ only)', s.type === 'custom' && s.angle === 30 && !s.fixX && s.fixY, JSON.stringify(s));
+    check('... the 5 mm settlement along the surface normal is unchanged, and so is every result',
+      settlements() === JSON.stringify([{ node: 2, dx: 0, dy: -5 * 1e-3 }]) && before.ok && sameResults(before, after));
+    setValue('#inspector [data-f="stype"]', 'inclined'); await settle();
+    check('Custom → inclined roller: keeps α = 30°', model().nodes[1].support.type === 'inclined' && model().nodes[1].support.angle === 30);
+    setValue('#inspector [data-f="sangle"]', '0'); await settle();
+    before = T.results();
+    setValue('#inspector [data-f="stype"]', 'custom'); await settle();
+    s = model().nodes[1].support; after = T.results();
+    check('inclined roller at α = 0° → Custom: stays at 0° (not 30°)', s.type === 'custom' && s.angle === 0 && !s.fixX && s.fixY, `α = ${s.angle}°`);
+    check('... the settlement still acts straight down, uy = −5 mm, and every result is unchanged',
+      after.ok && after.nodes[1].uy === -5 * 1e-3 && sameResults(before, after));
+  });
+
+  scenario('Opening version 1 files: the λ notice appears only with a settlement, and stays dismissed', async () => {
+    if (typeof DataTransfer !== 'function') { skip('opening files', 'this browser cannot build a file list (no DataTransfer)'); return; }
+    must('the notice is hidden to start with', el('#updateNotice').hidden);
+    if (!(await openFile(JSON.stringify(V1_FIXTURE), 'smoke-no-settlement-v1.truss.json'))) { skip('opening files', 'this browser cannot set files on a file input'); return; }
+    check('a version 1 file without a settlement: no notice', el('#updateNotice').hidden);
+    await openFile(JSON.stringify({ meta: { loadFactor: 1 }, model: V1_SETTLED_FIXTURE, status: 'solved' }), 'smoke-settlement-v1-report.json');
+    check('a version 1 report file (model nested under "model") opens, its settlement in Load case 1',
+      model().title === V1_SETTLED_FIXTURE.title && JSON.stringify(model().loadCases[0].settlements) === JSON.stringify([{ node: 2, dx: 0, dy: -0.01 }]));
+    check('... and the λ notice appears', !el('#updateNotice').hidden && /scales nodal loads and prescribed support settlements alike/.test(text('#updateNotice')));
+    check('the settlement on the pin, which version 1 ignored, is listed once under "Import notes" in the health report',
+      /Import notes/.test(text('#health')) && importNoteCount() === 1, text('#health').slice(0, 200));
+    if (!T.saveNow().saved) skip('import notes after a restart', 'this browser did not store the session');
+    else {
+      T.reloadStoredSession(); await settle(); // as at the next start: the saved session is read back
+      check('after the session is saved and read back, the import note is still listed, once', /Import notes/.test(text('#health')) && importNoteCount() === 1);
+    }
+    ctrl('z'); await settle();
+    check('Ctrl+Z goes back to the model opened before, with its own import notes (none)', model().title === V1_FIXTURE.title && !/Import notes/.test(text('#health')));
+    ctrl('y'); await settle();
+    check('Ctrl+Y brings the report\'s model back, with its import note', model().title === V1_SETTLED_FIXTURE.title && importNoteCount() === 1);
+    press('#btnDismissNotice'); await settle();
+    check('"Got it" hides the notice and remembers it', el('#updateNotice').hidden && T.settings().lambdaNoticeDismissed === true);
+    await openFile(JSON.stringify(V1_SETTLED_FIXTURE), 'smoke-settlement-v1.truss.json');
+    check('once dismissed it does not come back', el('#updateNotice').hidden);
+    await loadExample('pratt');
+    check('loading another model clears the import notes', !/Import notes/.test(text('#health')) && importNoteCount() === 0);
+  });
+
+  scenario('Saved sessions in this browser: migration and failure notes (smoke-test keys only)', async () => {
+    if (typeof Storage !== 'function' || !Storage.prototype) { skip('storage scenarios', 'this browser does not expose Storage'); return; }
+    const K = T.storageKeys, realGet = Storage.prototype.getItem, realSet = Storage.prototype.setItem, realRemove = Storage.prototype.removeItem;
+    try {
+      localStorage.removeItem(K.v2);
+      localStorage.setItem(K.v1, JSON.stringify({ model: V1_SETTLED_FIXTURE, settings: { grid: 1, forceUnit: 'MN' }, view: { cx: 2, cy: 1, zoom: 44 } }));
+      const res = T.reloadStoredSession(); await settle();
+      check('a version 1 session is loaded and migrated', res.restored && res.source === 'v1' && model().title === V1_SETTLED_FIXTURE.title);
+      const v2 = readStorage(K.v2);
+      check('it is written under the version 2 key, verified, and then the version 1 key is removed', v2 !== null && readStorage(K.v1) === null && JSON.parse(v2).model.version === 2);
+      check('its settings and view are kept', T.settings().grid === 1 && T.settings().forceUnit === 'MN' && JSON.parse(v2).view.zoom === 44);
+      check('its import note (the pin settlement version 1 ignored) is listed once', importNoteCount() === 1);
+      T.reloadStoredSession(); await settle();
+      check('at the next start, now from version 2, the import note is still listed, once', /Import notes/.test(text('#health')) && importNoteCount() === 1);
+      Storage.prototype.setItem = function (k, v) { if (k === K.v2) throw new Error('QuotaExceededError (simulated)'); return realSet.call(this, k, v); };
+      T.saveNow();
+      check('a failed save shows a persistent note in the status bar: "Changes not saved — browser storage unavailable"',
+        !el('#sbSave').hidden && text('#sbSave') === 'Changes not saved — browser storage unavailable', text('#sbSave'));
+      Storage.prototype.setItem = realSet;
+      T.saveNow();
+      check('the next successful save clears it', el('#sbSave').hidden);
+      localStorage.removeItem(K.v2);
+      localStorage.setItem(K.v1, JSON.stringify({ model: V1_FIXTURE, settings: {}, view: {} }));
+      Storage.prototype.removeItem = function (k) { if (k === K.v1) throw new Error('removal failed (simulated)'); return realRemove.call(this, k); };
+      T.reloadStoredSession(); await settle();
+      check('if only removing the old version 1 key fails, a different note says so, and the key is kept',
+        !el('#sbSave').hidden && /^Saved\. The old version 1 session could not be removed yet/.test(text('#sbSave')) && readStorage(K.v1) !== null, text('#sbSave'));
+      Storage.prototype.removeItem = realRemove;
+      T.saveNow();
+      check('the next save removes it and clears the note', readStorage(K.v1) === null && el('#sbSave').hidden);
+      // a read that fails must not be taken for a missing session
+      // the version 1 session holds a different model, so a migration over version 2 would show
+      const v1Text = JSON.stringify({ model: V1_SETTLED_FIXTURE, settings: {}, view: {} }), v2Text = readStorage(K.v2), title = model().title;
+      localStorage.setItem(K.v1, v1Text);
+      Storage.prototype.getItem = function (k) { if (k === K.v2) throw new Error('read failed (simulated)'); return realGet.call(this, k); };
+      const rf = T.reloadStoredSession(); await settle();
+      check('if the version 2 key cannot be read, nothing is loaded in its place: the version 1 session is not migrated over it',
+        !rf.restored && rf.source === 'none' && model().title === title, JSON.stringify(rf));
+      check('... the status bar says "Changes not saved — browser storage unavailable"', !el('#sbSave').hidden && text('#sbSave') === 'Changes not saved — browser storage unavailable', text('#sbSave'));
+      const rs = T.saveNow();
+      Storage.prototype.getItem = realGet;
+      check('... and saving writes nothing: both stored sessions are unchanged', !rs.saved && readStorage(K.v2) === v2Text && readStorage(K.v1) === v1Text);
+      localStorage.removeItem(K.v1);
+      T.reloadStoredSession(); await settle(); // reads work again, as after reloading the page
+      const rr = T.saveNow();
+      check('once the keys can be read again, saving resumes and the note clears', rr.saved && el('#sbSave').hidden, JSON.stringify(rr));
+    } finally {
+      Storage.prototype.getItem = realGet;
+      Storage.prototype.setItem = realSet;
+      Storage.prototype.removeItem = realRemove;
+      await applyTestSettings(); // the stored sessions above carried other settings (1 m grid, MN)
+    }
+  });
+
   scenario('Autosave writes the current model (under the smoke-test key)', async () => {
     await loadExample('fink');
     check('an autosave is scheduled after the change', T.autosavePending());
@@ -485,7 +678,14 @@
     savedSession = readStorage(T.storageKey);
     must('a session was saved under the smoke-test key', typeof savedSession === 'string' && savedSession.length > 0);
     check('the saved model matches the model on screen', JSON.stringify(JSON.parse(savedSession).model) === JSON.stringify(model()));
-    check('the real saved session was not written', readStorage(T.userStorageKey) === userSessionBefore);
+    // the page keeps names to the file reader's limits, so the saved session restores exactly the model on screen
+    must('the model title field is shown when nothing is selected', !!el('#inspector [data-f="title"]'));
+    setValue('#inspector [data-f="title"]', 'T'.repeat(130));
+    check('a 130-character title is cut to the 120 characters a file keeps', model().title === 'T'.repeat(120), `${model().title.length} characters`);
+    await sleep(700);
+    check('... and the session still saves and verifies: no "not saved" note, and the stored title is the same',
+      el('#sbSave').hidden && JSON.parse(readStorage(T.storageKey)).model.title === 'T'.repeat(120));
+    check('no user storage key was written', userKeysSnapshot() === userKeysBefore);
   });
 
   scenario('Open…: a saved session and a format-version-1 model file', async () => {
@@ -519,14 +719,26 @@
       a.nodes.every((n, i) => Object.is(n.ux, b.nodes[i].ux) && Object.is(n.uy, b.nodes[i].uy));
   }
 
+  /** The settings every scenario assumes. Also re-applied after a scenario loads a stored session with other settings. */
+  async function applyTestSettings() {
+    press('#segGrid button[data-grid="0.5"]');
+    setChecked('#chkSnap', true);
+    setChecked('#chkSnapNodes', true);
+    setChecked('#chkLive', true);
+    setChecked('[data-show="showDeformed"]', false); // picking then uses the model positions only
+    setValue('#selForceUnit', 'kN');
+    setValue('#numLoadFactor', '1');
+    await settle();
+  }
+
   async function main() {
-    if (!T || T.version !== 1) {
-      title.textContent = 'TrussLab smoke test: window.TrussLabTest (version 1) is missing. Open index.html?smoke.';
+    if (!T || T.version !== 2) {
+      title.textContent = 'TrussLab smoke test: window.TrussLabTest (version 2) is missing. Open index.html?smoke.';
       title.style.color = COLORS.fail;
       return;
     }
     const t0 = performance.now();
-    userSessionBefore = readStorage(T.userStorageKey);
+    userKeysBefore = userKeysSnapshot();
     const start = T.capture();
     const startResults = T.results();
     const ownCapture = Object.prototype.hasOwnProperty.call(canvas, 'setPointerCapture');
@@ -535,14 +747,7 @@
     try {
       await settle();
       heading('Setup');
-      press('#segGrid button[data-grid="0.5"]');
-      setChecked('#chkSnap', true);
-      setChecked('#chkSnapNodes', true);
-      setChecked('#chkLive', true);
-      setChecked('[data-show="showDeformed"]', false); // picking then uses the model positions only
-      setValue('#selForceUnit', 'kN');
-      setValue('#numLoadFactor', '1');
-      await settle();
+      await applyTestSettings();
       const s = T.settings();
       check('test settings applied: 0.5 m grid, snapping and live solve on, kN, λ = 1, deformed shape hidden',
         s.grid === 0.5 && s.snap && s.snapNodes && s.liveSolve && s.forceUnit === 'kN' && s.loadFactor === 1 && !s.showDeformed);
@@ -566,11 +771,12 @@
       check('the app is back exactly as it was before the test (model, settings, view, tool, selection, undo history, panels)', diffs.length === 0, `differs: ${diffs.join(', ')}`);
       check('re-solving the restored model gives the same results as at the start', sameResults(startResults, T.results()));
       check('no autosave is pending after the clean-up', !T.autosavePending());
-      check(`your saved session (${T.userStorageKey}) is unchanged${userSessionBefore === null ? ' (there was none)' : ''}`,
-        readStorage(T.userStorageKey) === userSessionBefore, 'it changed during the test; was TrussLab open in another tab?');
+      check('your saved sessions are unchanged (every user storage key, versions 2 and 1 and the backups)',
+        userKeysSnapshot() === userKeysBefore, 'one changed during the test; was TrussLab open in another tab?');
       check("canvas.setPointerCapture is the browser's own method again",
         canvas.setPointerCapture === nativeCapture && (ownCapture || !Object.prototype.hasOwnProperty.call(canvas, 'setPointerCapture')));
-      try { localStorage.removeItem(T.storageKey); } catch (e) { /* storage unavailable */ }
+      const smokeKeys = Object.values(T.storageKeys).concat(Array.from({ length: 19 }, (_, i) => `${T.storageKeys.backup}.${i + 2}`));
+      for (const k of smokeKeys) { try { localStorage.removeItem(k); } catch (e) { /* storage unavailable */ } }
       T.cancelAutosave();
       finish(performance.now() - t0);
     }

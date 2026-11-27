@@ -93,6 +93,12 @@ sub, sup { font-size: 0.72em; }
   font: 11px var(--mono); color: var(--muted); background: #0d131b; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden;
 }
 .statusbar .hint { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+.save-status.bad { color: var(--bad); }
+.save-status.info { color: var(--muted); }
+/* a one-line, dismissible notice above the canvas (not a modal; it never takes focus) */
+.update-notice { flex: none; display: flex; align-items: center; gap: 12px; padding: 6px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); font-size: 12.5px; line-height: 1.4; }
+.update-notice span { flex: 1 1 auto; }
+.note.warn-note { color: var(--warn); }
 
 /* ------------------------------------------------------------- controls */
 .btn {

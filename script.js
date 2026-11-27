@@ -1386,8 +1386,9 @@
       case 'l': setTool('load'); break;
       case 'h': setTool('pan'); break;
       case 'f': fitView(); break;
-      case 'g': state.s.snap = !state.s.snap; syncSettingsUI(); toast(`Grid snap ${state.s.snap ? 'on' : 'off'}`); break;
-      case 'd': state.s.showDeformed = !state.s.showDeformed; syncSettingsUI(); requestRender(); break;
+      // G and D do what the "Snap to grid" and "Deformed" checkboxes do, including the autosave (and, for D, the legend)
+      case 'g': state.s.snap = !state.s.snap; syncSettingsUI(); scheduleSave(); toast(`Grid snap ${state.s.snap ? 'on' : 'off'}`); break;
+      case 'd': state.s.showDeformed = !state.s.showDeformed; syncSettingsUI(); scheduleSave(); renderLegend(); requestRender(); break;
       case 'enter': e.preventDefault(); solve(true); break;
       case 'delete': case 'backspace': e.preventDefault(); deleteSelection(); break;
       case 'escape':

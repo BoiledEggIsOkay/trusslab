@@ -160,6 +160,13 @@
   function readStorage(k) {
     try { return localStorage.getItem(k); } catch (e) { return `(storage unavailable: ${e.message})`; }
   }
+  /** Settings in the session saved under the smoke-test key, or null. */
+  function savedSettings() {
+    const raw = readStorage(T.storageKey);
+    try { return raw ? JSON.parse(raw).settings : null; } catch (e) { return null; }
+  }
+  /** Waits until no autosave is queued, so the next one can be traced to a single action. */
+  async function noAutosavePending() { await waitFor('earlier autosaves to finish', () => !T.autosavePending(), 2000); }
   async function loadExample(key) {
     const tok = T.resultsToken();
     setValue('#selExample', key);
@@ -372,16 +379,34 @@
     blurAll();
   });
 
+  // Regression checks: D used to leave the colour legend unchanged, and neither D nor G autosaved.
   scenario('Display and snapping shortcuts: D and G', async () => {
-    const before = T.settings().showDeformed;
-    key('d');
-    check('D toggles the deformed shape and its checkbox', T.settings().showDeformed === !before && el('[data-show="showDeformed"]').checked === !before);
-    key('d');
-    check('D again restores it', T.settings().showDeformed === before);
-    key('g');
-    check('G turns grid snapping off, and the status bar says so', T.settings().snap === false && !el('#chkSnap').checked && /snap off/.test(text('#sbSnap')), text('#sbSnap'));
-    key('g');
-    check('G again turns it back on', T.settings().snap === true && el('#chkSnap').checked);
+    must('starting from a solved model', T.results().ok);
+    for (const press of ['first', 'second']) {
+      await noAutosavePending();
+      const before = T.settings().showDeformed;
+      key('d');
+      const after = T.settings().showDeformed;
+      check(`D (${press} press) toggles the deformed shape and its checkbox`, after === !before && el('[data-show="showDeformed"]').checked === after);
+      check(`D (${press} press) shows or hides the colour legend with it`, el('#legend').hidden === !after,
+        `legend ${el('#legend').hidden ? 'hidden' : 'shown'}, deformed shape ${after ? 'shown' : 'hidden'}`);
+      check(`D (${press} press) schedules an autosave`, T.autosavePending());
+      await sleep(500);
+      const saved = savedSettings();
+      check(`D (${press} press) is recorded in the saved session`, !!saved && saved.showDeformed === after, saved ? `saved ${saved.showDeformed}` : 'nothing saved');
+    }
+    for (const press of ['first', 'second']) {
+      await noAutosavePending();
+      const before = T.settings().snap;
+      key('g');
+      const after = T.settings().snap;
+      check(`G (${press} press) toggles grid snapping, its checkbox and the status bar`,
+        after === !before && el('#chkSnap').checked === after && text('#sbSnap') === (after ? `snap ${T.settings().grid} m` : 'snap off'), text('#sbSnap'));
+      check(`G (${press} press) schedules an autosave`, T.autosavePending());
+      await sleep(500);
+      const saved = savedSettings();
+      check(`G (${press} press) is recorded in the saved session`, !!saved && saved.snap === after, saved ? `saved ${saved.snap}` : 'nothing saved');
+    }
   });
 
   scenario('Section-group radios set the group used for new members', async () => {

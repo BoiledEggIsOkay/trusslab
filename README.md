@@ -17,6 +17,7 @@ python3 -m http.server 8000   # then browse to http://localhost:8000
 | `fea-core.js` | Numerical engine (no DOM). Usable from Node: `require('./fea-core.js').analyze(input)` |
 | `script.js` | Editor, canvas rendering, inspector, tables, matrix inspector and exports |
 | `test/fea-core.test.js` | Regression tests for the numerical engine (see [Accuracy checks performed](#accuracy-checks-performed)) |
+| `test/browser-smoke.js` | Browser smoke test of the user interface, run with `index.html?smoke` (see [Browser smoke test](#browser-smoke-test)) |
 
 The session (model, view, settings) is autosaved to `localStorage`.
 
@@ -87,6 +88,37 @@ It prints one line per check and exits with a non-zero code if any check fails.
 | Indeterminate X-braced truss with settlement (degree 2) | exact rational solution (Python `fractions`) | u 8e-17, F 6e-16, R 4e-15 |
 | Square without diagonal, unsupported triangle, collinear joint | must be rejected as unstable | detected and classified correctly |
 | 301-node Warren truss (599 free DOFs) | equilibrium | backward error 2.5e-17, solved in about 0.3 s |
+
+## Browser smoke test
+
+`test/browser-smoke.js` checks the user interface in a real browser. Open `index.html`, add `?smoke` to the end of the address, and press Enter. Keep the tab in front and don't touch the page while it runs (a few seconds). Browsers pause animation frames in background tabs, and the app solves and draws on them.
+
+A panel in the top-right corner lists every check as PASS, FAIL or SKIP and ends with an overall verdict. The same lines go to the browser console, prefixed `[smoke]`, and the summary is left in `window.TrussLabSmokeResult`.
+
+It drives the real app through its own event handlers. It sends pointer events to the canvas, key presses to the page and to focused controls, clicks buttons, and changes fields. It covers:
+
+- start-up and the Examples menu;
+- the tool shortcuts;
+- adding nodes (with grid snapping), members (chained, ended with Esc) and loads, checked against hand statics;
+- a support change that makes the truss unstable, which must be reported, not solved;
+- undo and redo (keys and buttons);
+- click, drag, Delete and box selection;
+- arrow-key nudging, and Enter/Space/arrow keys on focused controls being left to those controls;
+- the D, G and ? shortcuts;
+- the section-group radios, the bottom tabs and matrix inspector, the Export menu and the side-panel button;
+- autosave;
+- opening a saved session and a format-version-1 model file through the Open… file input.
+
+**Your work is not touched.** With `?smoke`, the app keeps its session under a separate storage key, so your saved session (`trusslab.session.v1`) is never loaded or written. The test checks at the end that it is unchanged. Close any other TrussLab tabs first, since they write that session too. The full in-memory state is captured before the first check and restored afterwards, even when a check fails, and pending autosaves are cancelled. `index.html?smoke=selftest` adds one deliberately failing scenario to show this. There, the verdict is PASS only if exactly that scenario fails and every clean-up check still passes.
+
+The test reads the app through `window.TrussLabTest`, a small adapter that `script.js` installs only in smoke mode. It returns copies, never live objects. The older `window.TrussLab` hook is unchanged.
+
+**Limits of synthetic events:**
+
+- `canvas.setPointerCapture()` is replaced by a no-op during the run, because browsers refuse pointer capture for synthetic pointers. Native pointer capture is not tested.
+- Synthetic key presses have no default action. The test checks that the app leaves Enter, Space and the arrow keys alone on focused controls; it cannot check that the browser then presses the button or moves the slider.
+- The side-panel button has a wide-window branch and a narrow-window branch (920 px or less). Only the branch matching the current window width runs.
+- Browsers without `DataTransfer` report the file-opening checks as SKIP.
 
 ## Assumptions and limitations
 

@@ -474,11 +474,16 @@
     $('#btnRedo').disabled = !history.redo.length;
   }
 
-  const STORE_KEY = 'trusslab.session.v1';
-  let saveTimer = 0;
+  /** index.html?smoke runs the browser smoke test (test/browser-smoke.js). Smoke mode keeps its
+   *  session under a separate key, so the user's saved session is never read or written. */
+  const SMOKE = /^\?(?:.*&)?smoke(?:[=&]|$)/.test(location.search);
+  const USER_STORE_KEY = 'trusslab.session.v1';
+  const STORE_KEY = SMOKE ? 'trusslab.smoke-test.session' : USER_STORE_KEY;
+  let saveTimer = 0; // 0 = no autosave pending
   function scheduleSave() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
+      saveTimer = 0;
       try {
         const keep = {};
         for (const k of Object.keys(DEFAULT_SETTINGS)) keep[k] = state.s[k];
@@ -2705,6 +2710,7 @@
    * 16. Start-up
    * ===================================================================== */
   function init() {
+    if (SMOKE) { try { localStorage.removeItem(STORE_KEY); } catch (e) { /* storage unavailable */ } } // every smoke run starts from the default example
     const restored = loadSession();
     if (!restored) state.model = buildExample('pratt');
     state.activeGroup = state.model.groups[0] || null;
@@ -2727,8 +2733,127 @@
     if (restored) toast('Previous session restored. Use New or Examples to start over');
     window.addEventListener('blur', () => { state.spaceDown = false; });
   }
+
+  /* =====================================================================
+   * 17. Testing adapter for the browser smoke test (installed only with ?smoke)
+   *
+   * A small, versioned interface. Queries return plain copies, never live
+   * objects, so tests cannot reach into internal state. Tests drive the app
+   * through real DOM events; this adapter only lets them observe the result,
+   * convert model coordinates to screen positions, and capture / restore the
+   * whole application state so a test run leaves no trace.
+   * ===================================================================== */
+  function createTestAdapter() {
+    const sortKeys = (k, v) => (v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.keys(v).sort().reduce((o, key) => { o[key] = v[key]; return o; }, {}) : v);
+    const canon = (v) => JSON.stringify(v, sortKeys);
+    const tokens = new WeakMap();
+    let tokenSeq = 0;
+    const tokenOf = (r) => { if (!tokens.has(r)) tokens.set(r, ++tokenSeq); return tokens.get(r); };
+    const selection = () => ({
+      nodes: [...state.sel.nodes].map((n) => state.model.nodes.indexOf(n)).filter((i) => i >= 0).sort((a, b) => a - b),
+      members: [...state.sel.members].map((e) => state.model.members.indexOf(e)).filter((i) => i >= 0).sort((a, b) => a - b),
+    });
+    function results() {
+      const r = state.res;
+      if (!r) return null;
+      return {
+        token: tokenOf(r), ok: !!r.ok, stale: !!state.stale,
+        errors: r.errors.map((e) => e.msg), warnings: r.warnings.map((w) => w.msg),
+        mechanism: r.mechanism ? { nullity: r.mechanism.nullity, kinds: r.mechanism.modes.map((m) => m.kind) } : null,
+        members: r.ok ? r.members.map((m) => ({ force: m.force, state: m.state, status: m.status })) : [],
+        nodes: r.ok ? r.nodes.map((n) => ({ ux: n.ux, uy: n.uy, rx: n.rx, ry: n.ry })) : [],
+      };
+    }
+    /** Everything a test run can change, as plain data. */
+    function capture() {
+      return Object.freeze({
+        model: JSON.stringify(serialize(state.model)),
+        settings: canon(state.s),
+        view: canon(state.view),
+        tool: state.tool,
+        selection: canon(selection()),
+        activeGroup: state.model.groups.indexOf(state.activeGroup),
+        editGroup: state.model.groups.indexOf(state.editGroup),
+        mechMode: state.mechMode,
+        toolOptions: canon({ supTool: state.supTool, loadTool: state.loadTool, sort: state.sort }),
+        undo: canon(history.undo),
+        redo: canon(history.redo),
+        appClass: $('#app').className,
+        helpHidden: $('#helpModal').hidden,
+        exportMenuHidden: $('#exportMenu').hidden,
+        bottomHeight: document.documentElement.style.getPropertyValue('--bottom-h'),
+      });
+    }
+    function cancelAutosave() { clearTimeout(saveTimer); saveTimer = 0; }
+    function restore(snap) {
+      cancelAutosave();
+      Object.assign(state, { drag: null, memberStart: null, spaceDown: false, hover: null, tableHover: null });
+      hideTooltip();
+      state.model = deserialize(JSON.parse(snap.model));
+      const settings = JSON.parse(snap.settings);
+      state.s = Object.assign({}, DEFAULT_SETTINGS, settings);
+      state.view = JSON.parse(snap.view);
+      const groups = state.model.groups;
+      state.activeGroup = groups[snap.activeGroup] || groups[0] || null;
+      state.editGroup = snap.editGroup >= 0 ? groups[snap.editGroup] || null : null;
+      state.mechMode = snap.mechMode;
+      Object.assign(state, JSON.parse(snap.toolOptions));
+      history.undo = JSON.parse(snap.undo);
+      history.redo = JSON.parse(snap.redo);
+      const sel = JSON.parse(snap.selection);
+      state.sel.nodes = new Set(sel.nodes.map((i) => state.model.nodes[i]).filter(Boolean));
+      state.sel.members = new Set(sel.members.map((i) => state.model.members[i]).filter(Boolean));
+      $('#app').className = snap.appClass;
+      $('#helpModal').hidden = snap.helpHidden;
+      $('#exportMenu').hidden = snap.exportMenuHidden;
+      if (snap.bottomHeight) document.documentElement.style.setProperty('--bottom-h', snap.bottomHeight);
+      setTool(snap.tool);
+      renderLeftLists();
+      setBottomTab(settings.bottomTab);
+      setBottomCollapsed(!!settings.bottomCollapsed);
+      solve(false);
+      Object.assign(state.s, settings); // solve() may have auto-rescaled the deflection: keep the captured value
+      syncSettingsUI();
+      updateUndoButtons();
+      updateZoomLabel();
+      renderInspector();
+      refreshResults();
+      resizeCanvas();
+      cancelAutosave(); // the calls above schedule autosaves; the restored state must not be re-saved
+    }
+    return Object.freeze({
+      version: 1,
+      storageKey: STORE_KEY,
+      userStorageKey: USER_STORE_KEY,
+      model: () => serialize(state.model),
+      results,
+      resultsToken: () => (state.res ? tokenOf(state.res) : 0),
+      settings: () => JSON.parse(JSON.stringify(state.s)),
+      tool: () => state.tool,
+      selection,
+      history: () => ({ undo: history.undo.length, redo: history.redo.length }),
+      worldToClient(x, y) { const [sx, sy] = w2s(x, y), rc = canvas.getBoundingClientRect(); return { x: rc.left + sx, y: rc.top + sy }; },
+      autosavePending: () => saveTimer !== 0,
+      cancelAutosave,
+      capture,
+      restore,
+      /** Names of the captured fields that differ between two captures. */
+      diff: (a, b) => Object.keys(a).filter((k) => a[k] !== b[k]),
+    });
+  }
+
   init();
 
-  // test hook for automated checks (no effect on the UI)
+  // Older test hook, kept unchanged for compatibility. It exposes live internal state;
+  // new tests use window.TrussLabTest (section 17) instead.
   window.TrussLab = { state, solve, buildExample, loadModel, serialize, deserialize, parseExpr, sectionProps };
+
+  if (SMOKE) {
+    window.TrussLabTest = createTestAdapter();
+    const s = document.createElement('script');
+    s.src = 'test/browser-smoke.js';
+    s.onerror = () => toast('Smoke test: test/browser-smoke.js could not be loaded', 'bad');
+    document.body.appendChild(s);
+  }
 })();

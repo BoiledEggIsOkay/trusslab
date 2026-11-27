@@ -53,7 +53,7 @@ Output (main fields):
 
 ## 4. λ and settlements
 
-**Current behaviour (until milestone 3).** `buildInput` in `script.js` sends `fx·λ`, `fy·λ`, and the support's `dx`/`dy` unscaled. The λ tooltip says so. Therefore u(λ) = λ·u_loads + u_settlement, and the same holds for N and R.
+**Current behaviour (until milestone 3).** `TrussModel.toAnalysisInput` (called by `buildInput` in `script.js`) sends `fx·λ`, `fy·λ`, and the support's `dx`/`dy` unscaled. The λ tooltip says so, and `test/model.test.js` records it in a temporary characterisation test. Therefore u(λ) = λ·u_loads + u_settlement, and the same holds for N and R.
 
 **Agreed for milestone 3.**
 - Every prescribed action belongs to a load case: nodal forces and settlements alike. Supports keep only type, frame angle and fixed axes.

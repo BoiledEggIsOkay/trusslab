@@ -2,7 +2,7 @@
 
 Contents: 1 In-memory model · 2 Supports and settlements · 3 File format version 1 · 4 What `deserialize` accepts · 5 Compatibility requirements for version 2 (milestone 3)
 
-The code lives in `script.js` section 2 (`serialize`, `deserialize`, the constructors and presets) until milestone 2 moves it to `model.js`. Check the code when in doubt: it wins over this file, and then this file needs correcting.
+The code lives in `model.js` (global `TrussModel`): `serialize`, `deserialize`, the constructors and the presets. `test/model.test.js` checks the behaviour described here. Check the code when in doubt: it wins over this file, and then this file needs correcting.
 
 ## 1. In-memory model
 

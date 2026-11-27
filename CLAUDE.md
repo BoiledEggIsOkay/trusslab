@@ -36,14 +36,15 @@ Keep `fea-core.js` one self-contained file. Change its mathematical formulation 
 | Global | Defined in | Notes |
 |---|---|---|
 | `FEA` | `fea-core.js` | Numerical engine; also `module.exports` under Node |
+| `TrussModel` | `model.js` | DOM-free model layer: parser, materials and sections, model objects, file format version 1, examples, `toAnalysisInput`; also `module.exports` under Node |
 | `TrussLab` | `script.js` (end) | Older test hook that exposes live internal state. Keep it unchanged for compatibility; new code and tests must not depend on it |
 | `TrussLabTest` | `script.js` section 17 | Testing adapter, version 1, installed only in smoke mode (`?smoke`) |
 
-Script order in `index.html`: `fea-core.js`, then `script.js`.
+Script order in `index.html`: `fea-core.js`, `model.js`, then `script.js`.
 
 ## Tests
 
-- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js`, with 41 checks.
+- Headless: `.claude/skills/trusslab-testing/scripts/check.sh` syntax-checks every `.js` file and runs every `test/*.test.js` suite. Today that is `test/fea-core.test.js` (41 checks) and `test/model.test.js` (206 checks, including the nine examples against the regression baseline in `test/fixtures/examples-baseline.js`).
 - Browser smoke test (`test/browser-smoke.js`), in two modes:
   - `index.html?smoke` runs every scenario against the real page and must end with PASS.
   - `index.html?smoke=selftest` adds one deliberately failing scenario. It ends with PASS only if exactly that scenario fails and every clean-up check still passes, which shows that a failing test cannot damage the user's work.
@@ -55,9 +56,10 @@ Done:
 - `81eac1c` Rev 1: review fixes, numerical test suite, licence, `.gitignore`.
 - `0bb4657` Rev 2, milestone 1: browser smoke test and the `TrussLabTest` adapter.
 - `0e3dbae` Rev 3: the D and G shortcuts refresh the legend and autosave.
+- `3b88695`, `1a0b122`: `CLAUDE.md`, the project Skills, local testing notes, the vendored `frontend-design` Skill, `trusslab-ui-design` and the redesign milestone.
+- Milestone 2: DOM-free model layer. `model.js` (global `TrussModel`) with `toAnalysisInput`, `test/model.test.js` (206 checks) and the example baseline `test/fixtures/examples-baseline.js`. No behaviour change; file format version 1 unchanged.
 
 Next, strictly one at a time, each approved before the next begins:
-2. DOM-free model layer: `model.js` (global `TrussModel`) and `test/model.test.js`. No behaviour change; file format version 1 unchanged.
 3. Load cases. Settlements move from supports into load cases, and λ scales loads and settlements. File format version 2, which must keep reading, with a migration test for each:
    - existing version 1 model files;
    - autosaved sessions in `localStorage` (`trusslab.session.v1`, which wrap the model together with settings and view);

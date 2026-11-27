@@ -22,13 +22,13 @@ A feature that truly needs a network goes into the documentation as an optional 
 | File | Role | Global |
 |---|---|---|
 | `fea-core.js` | Numerical engine, no DOM | `FEA` (plus `module.exports` under Node) |
-| `model.js` (from milestone 2) | DOM-free model layer: parser, sections, constructors, examples, serialisation, solver input | `TrussModel` |
+| `model.js` | DOM-free model layer: parser, sections, constructors, supports, serialisation, examples, solver input (`toAnalysisInput`) | `TrussModel` (plus `module.exports` under Node) |
 | `script.js` | All page code: one IIFE in numbered sections | `TrussLab` (older hook), `TrussLabTest` (smoke mode only) |
 | `index.html`, `style.css` | Layout, help dialog, theme | none |
 | `test/*.test.js` | Headless suites (jsc or Node) | none |
 | `test/browser-smoke.js` | Browser smoke test, loaded by `index.html?smoke` | `TrussLabSmokeResult` (summary) |
 
-A script may use, at load time, only the globals defined by scripts above it in `index.html`. `script.js` reads what it needs once at the top of its IIFE. If a required global is missing, show a clear message on the page the way `script.js` already does when `FEA` is missing, instead of failing silently.
+A script may use, at load time, only the globals defined by scripts above it in `index.html`. `script.js` reads what it needs once at the top of its IIFE. If a required global is missing, show a clear message on the page the way `script.js` already does when `fea-core.js` or `model.js` has not loaded, instead of failing silently.
 
 ## Pattern for a DOM-free file
 
@@ -62,7 +62,7 @@ Functions that turn the model into solver input or results must not mutate the m
 
 ## `script.js`
 
-One IIFE in numbered sections: 1 helpers and formatting, 2 materials, sections and model objects, 3 examples, 4 state, history and persistence, 5 analysis driver, 6 view, snapping and picking, 7 rendering, 8 editing, 9 pointer and keyboard, 10 left panel, 11 inspector, 12 status and health report, 13 bottom panel, 14 export, 15 miscellaneous UI, 16 start-up, 17 testing adapter.
+One IIFE in numbered sections: 1 helpers and formatting, 2 the display text for supports (`supportText`; the model objects are in `model.js`), 3 a note only (the examples are in `model.js`), 4 state, history and persistence, 5 analysis driver, 6 view, snapping and picking, 7 rendering, 8 editing, 9 pointer and keyboard, 10 left panel, 11 inspector, 12 status and health report, 13 bottom panel, 14 export, 15 miscellaneous UI, 16 start-up, 17 testing adapter.
 
 Put new page code in the matching section. The sections call each other in both directions (undo in §4 calls `modelChanged` in §8; `solve` in §5 calls `refreshResults` in §12). So do not split `script.js` into one file per section. Move code out only when a milestone calls for it, and then along real boundaries: DOM-free logic first, then large UI areas such as rendering, panels, input or exports.
 

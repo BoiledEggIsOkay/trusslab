@@ -33,6 +33,7 @@ const out = typeof console !== 'undefined' && console.log ? console.log.bind(con
 ```
 
 - Load extra DOM-free files the same way: `require('../model.js')` under Node, `load('model.js')` under jsc, after `fea-core.js`.
+- `test/model.test.js` covers `model.js`. Its example checks compare against `test/fixtures/examples-baseline.js`, the results captured from the code before milestone 2. That file is a regression baseline: never regenerate it to make a test pass. A deliberate change to an example or to the analysis updates it in the same commit, with the reason.
 - Compare with closed-form or hand-statics references, and write the reference down in a comment. Use relative tolerances: about 1e-14 for direct closed forms, looser only with a stated reason, such as cancellation in a small reaction.
 - Wrap each group of checks in `testCase`, so a crash counts as a failure instead of ending the run.
 - Name a check by what it proves ("member 1 carries -62.5 kN (closed form)"), not by how it is computed.

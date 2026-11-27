@@ -15,8 +15,10 @@ python3 -m http.server 8000   # then browse to http://localhost:8000
 | `index.html` | Page layout, panels and help dialog |
 | `style.css` | Dark CAD-style theme |
 | `fea-core.js` | Numerical engine (no DOM). Usable from Node: `require('./fea-core.js').analyze(input)` |
+| `model.js` | Model layer (no DOM): expression parser, materials and sections, model objects, the file format, the examples, and the solver input. Usable from Node: `require('./model.js')` |
 | `script.js` | Editor, canvas rendering, inspector, tables, matrix inspector and exports |
 | `test/fea-core.test.js` | Regression tests for the numerical engine (see [Accuracy checks performed](#accuracy-checks-performed)) |
+| `test/model.test.js` | Headless tests for `model.js`, including the results of all nine examples against `test/fixtures/examples-baseline.js` |
 | `test/browser-smoke.js` | Browser smoke test of the user interface, run with `index.html?smoke` (see [Browser smoke test](#browser-smoke-test)) |
 
 The session (model, view, settings) is autosaved to `localStorage`.
@@ -76,7 +78,7 @@ node test/fea-core.test.js
 /System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc test/fea-core.test.js
 ```
 
-It prints one line per check and exits with a non-zero code if any check fails.
+It prints one line per check and exits with a non-zero code if any check fails. `test/model.test.js` covers `model.js` (the expression parser, section properties, the file format and its imports, the solver input, and the nine examples) and runs the same way.
 
 | Case | Reference | Max. relative error |
 |------|-----------|---------------------|

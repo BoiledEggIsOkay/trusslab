@@ -8,13 +8,15 @@ The code lives in `model.js` (global `TrussModel`): `serialize`, `readModel` (an
 
 ```
 model    = { title, nodes: [node], members: [member], materials: [material], groups: [group], loadCases: [loadCase], activeCase,
-             combinations: [combination], activeCombination }                  // activeCombination: a combination, or null
+             combinations: [combination], activeCombination,                   // activeCombination: a combination, or null
+             design: { deflection } }                                         // milestone 10; deflection: null or the criterion below
 material = { uid, preset: 'steel' | 'aluminum' | 'fir' | 'custom', name, E, fy, density, color }   // density: kg/m³, or null (not set)
 group    = { uid, name, material, shape: { type, ...dims }, color, A, I }        // a "section" in files
 node     = { uid, x, y, support: { type, angle, fixX, fixY } }
 member   = { uid, n1, n2, group }
 loadCase = { uid, name, generated: null | 'self-weight', loads: Map(node → { fx, fy }), settlements: Map(node → { dx, dy }) }
 combination = { uid, name, terms: [{ loadCase, factor }] }                    // milestone 5; terms in load-case order
+deflection  = { a: node, b: node, nodes: [node], limit: { type: 'ratio' | 'absolute', value } }   // milestone 10; value: span/δ ratio, or metres
 ```
 
 - Objects refer to each other by reference (`group.material`, `member.n1`, `member.group`, the Map keys, `model.activeCase`), not by id. A `uid` exists only for the current session and is never saved.
@@ -51,6 +53,7 @@ A support holds only its restraint: which axes of its nodal frame are fixed, and
 - `toAnalysisInput(model, { loadFactor: λ, loadCase, targetSF })` analyses one case (default: the active one) and multiplies all its actions by λ: `fx·λ`, `fy·λ`, `dx·λ`, `dy·λ`. See `analysis-math.md` §4.
 - **The self-weight case** (milestone 4) is a load case with `generated: 'self-weight'`, added by `addSelfWeightCase(model)` (at most one per model; not activated; the page activates it). Its loads are never stored: `caseLoads(model, lc)` returns `selfWeightLoads(model)` for it, computed now from the current geometry, sections and materials, so they cannot go stale or add up. `nodeLoad` and `toAnalysisInput` read through `caseLoads`. `setNodeLoad` and `setNodeSettlement` return `false` and change nothing in it, so manual actions never mix with generated ones; in every other case they return `true`. See `analysis-math.md` §6 for W = ρ·A·L·g and the lumping.
 - **Load combinations** (milestone 5): `model.combinations`, each `{ uid, name, terms: [{ loadCase, factor }] }` with at most one term per load case, kept in load-case order. A factor γ is any finite number: negative reverses a case, 0 keeps it listed without effect. `addCombination` ("Combination N", not activated), `removeCombination`, `setActiveCombination(model, comb | null)`, `combinationFactor(comb, lc)` (null when the case is not in it), `setCombinationFactor(model, comb, lc, γ | null)` (null removes the term; `false`, changing nothing, for an invalid factor or a case or combination not in the model). `removeLoadCase` also removes the case's terms from every combination. `setActiveLoadCase` clears the active combination.
+- **The deflection criterion** (milestone 10): `setDeflectionCriterion(model, crit | null)` sets or clears it (`false`, changing nothing, unless A and B are two different nodes of the model and the limit is `ratio` or `absolute` with a finite value > 0; duplicate and foreign evaluation nodes are dropped). `pruneDesign(model)` after deleting nodes removes them from the criterion, or removes the criterion when A or B is gone, and returns `'nodes'`, `'criterion'` or `''` (the page says which). The check itself is in `design.js` (`design-conventions.md` §5).
 - **The active state.** Reading defaults to `activeTarget(model)`: the active combination when one is chosen, otherwise the active case. So `nodeLoad`, `nodeSettlement`, `caseLoads`, `caseSettlements` and `toAnalysisInput` read a combination's combined actions `F = Σ γᵢ·Fᵢ` (`combinationLoads`) and `u_s = Σ γᵢ·u_s,ᵢ` (`combinationSettlements`), computed whenever they are read, never stored. `setNodeLoad` and `setNodeSettlement` return `false` for a combination, explicit or by default, so actions are entered only in load cases. `activeCase` stays the case loads are entered in.
 - In `script.js`, undo snapshots are `JSON.stringify({ model: serialize(model), caseUids, comboUids })`: the uids let an undo keep the load case or combination on screen when it still exists (and stay on the load case when none was shown). Switching what is shown is not an edit and is not undone.
 
@@ -79,6 +82,7 @@ A support holds only its restraint: which axes of its nodal frame are fixed, and
 - Load and settlement lists are sparse (non-zero entries only), in node order. Every support is written with all four fields, so a custom support with no fixed axis round-trips exactly.
 - Milestone 4 added two optional fields to version 2 (see §8): a material's `density` (kg/m³, or `null` when not set), and `"generated": "self-weight"` on the self-weight case, which is written without loads or settlements because they are computed again from the members when the file is read. An ordinary case has no `generated` field.
 - Milestone 5 added two more optional fields (see §8): `combinations` (each with an `id`, a `name` and `terms` naming load cases by id, in load-case order) and `activeCombination` (an id, or `null`). Both are always written, `[]` and `null` when there are none.
+- Milestone 10 added `design` (see §8): `{ "deflection": { "chordA": id, "chordB": id, "nodes": [ids], "limit": { "type": "ratio" | "absolute", "value": v } } }`, **written only when a criterion is set**, so files without one are exactly as before (the top-level field list test is unchanged).
 - Exporting version 1 is discontinued. Model files, calculation reports (`{ meta, model, … }`; `meta` names the analysed load case, or `meta.combination` the analysed combination with its terms, and `combinationResults` lists every combination solved on its own with the worst case over them) and saved sessions all contain version 2.
 
 ## 5. What `readModel` accepts
@@ -110,6 +114,8 @@ The page shows a one-time notice when a version 1 model, report or session with 
 - A missing or `null` density means not set, without a note: files written before milestone 4 have none, and the preset is never used to fill it in, even when E and fy still equal the preset's exactly, because the material may have been changed since it was created (maintainer decision, milestone 4). Every version 1 file, and every version 2 file or session written before milestone 4, therefore reads without densities; a self-weight case then warns (§6) and is marked incomplete (`analysis-math.md` §6).
 - A density that is a number, or a string holding one, of 0 or more is kept; anything else (negative, not finite, text, `true`, an object) is not set, with a note.
 - A case with `"generated": "self-weight"` is read as the generated case; loads or settlements stored with it are not applied (they would be stale), with a note. A case with any other `generated` value is read as an ordinary case with its entries, with a note that this version cannot generate it.
+
+**Design data** (milestone 10, `readDesignV2`), read after the combinations. It is design input, not structure, so a malformed criterion never rejects the file: it is left out with a note. Missing or `null` `design`: no criterion, no note. A `design` that is not an object, a `deflection` that is not an object, chord ids that are not two different nodes of the file, or a limit that is not a positive ratio or length (a numeric string is read): the criterion is not applied, with a note. Evaluation node ids that do not exist are skipped, one note each; duplicates are dropped. Version 1 files have no criterion.
 
 **Combinations** (milestone 5, `readCombinationsV2`), read after the load cases:
 - Missing or `null` `combinations`: none, without a note (files before milestone 5). An `activeCombination` without any combinations gives a note.
@@ -162,6 +168,8 @@ Smoke mode uses `SMOKE_SESSION_KEYS` (`trusslab.smoke-test.session.v2`, `.v1`, `
 - Every build from milestone 3 on uses the same session key, `trusslab.session.v2`, so opening a milestone 3 build in the same browser rewrites the autosaved session in that form at its first save.
 
 **Milestone 5** added `combinations` and `activeCombination` the same way, because the same holds: a milestone 4 reader (Rev 6, Rev 7) ignores both fields without a note, so it loses only the combinations, and drops them from a file or session it saves; load cases, the self-weight case and all entered actions are kept. The same session key means opening such a build rewrites the autosaved session without its combinations. This is the downgrade limitation accepted for milestone 4, extended to combinations, and documented in the README.
+
+**Milestone 10** added `design` the same way: a reader from before milestone 10 ignores it without a note, so it loses only the deflection criterion, and drops it from a file or session it saves. Documented in the README.
 
 Add further fields the same way only when the same holds (an older reader loses only the additions, never structural data or entered actions); otherwise bump the version as below.
 

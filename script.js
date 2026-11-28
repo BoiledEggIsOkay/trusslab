@@ -22,10 +22,13 @@
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const MINUS = '\u2212';
-  const MONO = 'ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace';
-  const SANS = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+  // The bundled IBM Plex faces (fonts/, SIL OFL 1.1), with system fallbacks: the canvas uses the same faces as the page.
+  const MONO = '"IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace';
+  const SANS = '"IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
   const dpr = () => window.devicePixelRatio || 1;
   const cosSinDeg = FEA.util.cosSinDeg;
+  /** prefers-reduced-motion: the solve animation is skipped and a mechanism mode is drawn static at full amplitude. */
+  const REDUCED_MOTION = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
   // The model layer lives in model.js (global TrussModel, no DOM): units, the expression parser, materials,
   // sections, model objects, supports, load cases, the file format, model checks, the examples, the solver
   // input and saved sessions.
@@ -37,6 +40,7 @@
     addLoadCase, removeLoadCase, setActiveLoadCase, removeNodeActions, nodeLoad, setNodeLoad, nodeSettlement, setNodeSettlement, modelHasSettlement,
     GRAVITY, validDensity, isGeneratedCase, memberSelfWeight, selfWeightCase, addSelfWeightCase, selfWeightSummary,
     addCombination, removeCombination, setActiveCombination, combinationFactor, setCombinationFactor, analyzeCombination, combinationEnvelope,
+    setDeflectionCriterion, pruneDesign,
     SESSION_KEYS, SMOKE_SESSION_KEYS, loadStoredSession, saveStoredSession,
   } = TrussModel;
 
@@ -111,10 +115,13 @@
     showUndeformed: true, showDeformed: true, showLoads: true, showReactions: true, showSupports: true,
     showNodeLabels: true, showMemberLabels: false, showForceLabels: false, animate: true,
     liveSolve: true, chain: true,
-    bottomTab: 'members', bottomCollapsed: false, bottomHeight: 250,
+    bottomTab: 'members', bottomCollapsed: true, bottomHeight: 240,
     mtxView: 'global', mtxUnit: 'kN/m', mtxMode: 'table', mtxDimZeros: true,
     lambdaNoticeDismissed: false,
+    // milestone 6: presentation only; none of these changes the model or the analysis
+    workspace: 'analyze', uiMode: 'guided', rightTab: 'inspector',
   };
+  const WORKSPACES = ['learn', 'analyze', 'design'];
   const state = {
     model: null,
     s: Object.assign({}, DEFAULT_SETTINGS),
@@ -133,6 +140,10 @@
     sort: { members: { key: 'id', dir: 1 }, nodes: { key: 'id', dir: 1 } },
     importNotes: [], // notes from reading the current model (readModel), shown in the health report
     lastP: null, W: 0, H: 0,
+    viewOnly: false,     // phones (≤ 640 px): view and inspect only, every editing entry point refuses
+    viewOnlyTest: null,  // smoke mode only: forces the view-only state on (true) or off (false)
+    learn: { view: 'home' }, // what the Learn workspace shows (section 18)
+    touches: new Map(),  // active touch pointers, for pinch zoom
   };
   function S() { return state.s; }
 
@@ -265,7 +276,7 @@
     if (session.source === 'v1' && session.hasSettlement) showLambdaNotice();
     if (session.readFailed) saveNow(); // refused at once, so the status bar says so from the start
     const parts = [];
-    if (session.restored) parts.push(session.source === 'v1' ? 'Previous session restored and converted to file format version 2' : 'Previous session restored. Use New or Examples to start over');
+    if (session.restored) parts.push(session.source === 'v1' ? 'Previous session restored and converted to file format version 2' : 'Previous session restored. Start over from the File menu');
     if (session.backup && session.backup.ok) parts.push('an unreadable saved session was kept as a backup in browser storage');
     if (session.readFailed) parts.push('your saved session could not be read from browser storage, so changes are not saved until you reload the page');
     return parts.join('; ');
@@ -308,7 +319,7 @@
     if (r.ok && state.s.autoScale) autoScale();
     if (r.mechanism) { state.mechMode = clamp(state.mechMode, 0, r.mechanism.modes.length - 1); if (!state.mechT0) state.mechT0 = performance.now(); }
     else state.mechT0 = 0;
-    if (animate && r.ok && state.s.animate) { state.anim.start = performance.now(); state.anim.p = 0; }
+    if (animate && r.ok && state.s.animate && !REDUCED_MOTION.matches) { state.anim.start = performance.now(); state.anim.p = 0; }
     refreshResults();
     requestRender();
   }
@@ -343,6 +354,7 @@
     const r = state.res;
     if (!r) return null;
     if (state.stale && !state.s.liveSolve) return null;
+    if (resultsHidden()) return null; // a prediction activity hides every result until the learner checks
     return r;
   }
   const nodeRes = (r, n) => { const i = r && r.ok ? r.nodeIndex.get(n) : undefined; return i === undefined ? null : r.nodes[i]; };
@@ -434,7 +446,7 @@
     else if (r && !r.ok && r.mechanism && r.mechanism.modes.length) {
       const amp = 0.06 * Math.max(modelExtent(), 1);
       info.mode = 'mechanism';
-      info.factor = amp * Math.sin(((now || performance.now()) - state.mechT0) / 1000 * 2.6);
+      info.factor = REDUCED_MOTION.matches ? amp : amp * Math.sin(((now || performance.now()) - state.mechT0) / 1000 * 2.6);
       info.modeVec = r.mechanism.modes[state.mechMode].u;
     }
     return info;
@@ -495,13 +507,38 @@
   /* =====================================================================
    * 7. Rendering
    * ===================================================================== */
-  const COL = {
-    bg: '#0b1118', gridMinor: '#141d29', gridMajor: '#1d2a3b', axis: '#34465f', gridText: '#4b5b70',
-    member: '#a9b8cb', ghost: '#3d4b5e', node: '#e2e8f0', nodeStroke: '#0b1118',
-    sel: '#fbbf24', hover: '#38bdf8', support: '#8fa3bb', custom: '#a78bfa', load: '#fbbf24', reaction: '#34d399',
-    tension: [59, 130, 246], compression: [239, 68, 68], zero: [107, 114, 128], mech: '#fbbf24', fail: '#f87171',
-  };
-  const ZERO_COLOR = `rgb(${COL.zero.join(',')})`;
+  /** The canvas palette: read once from the CSS tokens in style.css (:root), so every colour has one source. */
+  function hexToRgb(h) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(h).trim());
+    if (!m) return [128, 128, 128];
+    const v = parseInt(m[1], 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  }
+  /** A token colour with an alpha, for halos and plates. */
+  const alpha = (rgb, a) => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
+  function readPalette() {
+    const cs = getComputedStyle(document.documentElement);
+    const tok = (name, fallback) => (cs.getPropertyValue(name).trim() || fallback);
+    const P = {
+      bg: tok('--bg-workspace', '#151F2C'), gridMinor: tok('--grid-minor', '#19232F'), gridMajor: tok('--grid-major', '#223042'),
+      axis: tok('--axis', '#33465E'), gridText: tok('--grid-label', '#909FB4'),
+      member: tok('--member', '#C3CEDB'), ghost: tok('--ghost', '#6B7E95'), node: tok('--node', '#E6EDF5'),
+      sel: tok('--selection', '#B9A1FF'), hover: tok('--selection', '#B9A1FF'), support: tok('--support', '#9BAABD'),
+      custom: tok('--settlement', '#5FB8AB'), load: tok('--load', '#E6EDF5'), reaction: tok('--reaction', '#4FD1B5'),
+      tensionHex: tok('--tension', '#6E9CFF'), compressionHex: tok('--compression', '#FF9466'), zeroHex: tok('--zero', '#8C99AB'),
+      fail: tok('--failure', '#F47AD6'), plate: tok('--label-plate', 'rgba(16,23,34,0.86)'),
+      text1: tok('--text-1', '#E6EDF5'), text2: tok('--text-2', '#9BAABD'), text3: tok('--text-3', '#909FB4'),
+      accent: tok('--accent', '#58C7E8'), accent2: tok('--accent-2', '#5FB8AB'), warn: tok('--warn', '#E8B04B'),
+    };
+    P.nodeStroke = P.bg;
+    P.mech = P.fail;
+    P.tension = hexToRgb(P.tensionHex); P.compression = hexToRgb(P.compressionHex); P.zero = hexToRgb(P.zeroHex);
+    P.selRgb = hexToRgb(P.sel); P.failRgb = hexToRgb(P.fail); P.supportRgb = hexToRgb(P.support); P.accentRgb = hexToRgb(P.accent);
+    return P;
+  }
+  const COL = readPalette();
+  const ZERO_XY = Object.freeze({ fx: 0, fy: 0 });
+  const ZERO_COLOR = COL.zeroHex;
   let renderQueued = false;
   function requestRender() { if (!renderQueued) { renderQueued = true; requestAnimationFrame(frame); } }
   function frame(now) {
@@ -513,7 +550,8 @@
     }
     draw(now);
     const r = R();
-    if (state.anim.p < 1 || (r && !r.ok && r.mechanism)) requestRender();
+    // the mechanism mode animates, unless the user prefers reduced motion (then it is drawn static at full amplitude)
+    if (state.anim.p < 1 || (r && !r.ok && r.mechanism && !REDUCED_MOTION.matches)) requestRender();
   }
   function resizeCanvas() {
     const rect = viewport.getBoundingClientRect();
@@ -526,12 +564,12 @@
   }
 
   function mix(c0, c1, t) { return `rgb(${Math.round(c0[0] + (c1[0] - c0[0]) * t)},${Math.round(c0[1] + (c1[1] - c0[1]) * t)},${Math.round(c0[2] + (c1[2] - c0[2]) * t)})`; }
-  /** Member colour: blue tension, red compression, grey zero-force; intensity ∝ |value| / max. */
+  /** Member colour: tension blue, compression orange, zero-force grey (dashed); intensity ∝ |value| / max. */
   function memberColor(mr, scaleMax) {
     if (!mr || mr.state === 'zero') return ZERO_COLOR;
     const v = colorValue(mr);
     const t = scaleMax > 0 ? clamp(Math.abs(v) / scaleMax, 0, 1) : 1;
-    return mix(COL.zero, mr.force > 0 ? COL.tension : COL.compression, 0.35 + 0.65 * Math.sqrt(t));
+    return mix(COL.zero, mr.force > 0 ? COL.tension : COL.compression, 0.4 + 0.6 * Math.sqrt(t));
   }
   function colorValue(mr) {
     switch (state.s.colorBy) {
@@ -558,15 +596,16 @@
     const info = displayInfo(now);
     const r = info.r;
     const M = state.model;
-    const showRes = info.mode === 'deformed';
+    const hide = resultsHidden();
+    const showRes = info.mode === 'deformed' && !hide;
     const P = new Map();
-    for (const n of M.nodes) P.set(n, w2s(...dispPos(n, info)));
+    for (const n of M.nodes) P.set(n, w2s(...(hide ? [n.x, n.y] : dispPos(n, info))));
     const O = new Map();
     for (const n of M.nodes) O.set(n, w2s(n.x, n.y));
     const hoverObj = (state.hover && state.hover.obj) || state.tableHover;
 
     // undeformed ghost
-    if (info.mode !== 'model' && state.s.showUndeformed) {
+    if (info.mode !== 'model' && !hide && state.s.showUndeformed) {
       ctx.save();
       ctx.setLineDash([5, 4]);
       ctx.lineWidth = 1.2;
@@ -580,29 +619,31 @@
     const scaleMax = showRes ? colorScaleMax(r) : 0;
     const mechNodes = info.mode === 'mechanism' ? new Set(r.mechanism.modes[state.mechMode].nodes.map((i) => r.nodeObjs[i])) : null;
 
-    // selection / hover underlay
+    // selection underlay (solid) and hover (lighter)
     for (const e of M.members) {
       const sel = state.sel.members.has(e), hov = hoverObj === e;
       if (!sel && !hov) continue;
       const a = P.get(e.n1), b = P.get(e.n2);
-      ctx.strokeStyle = sel ? 'rgba(251,191,36,0.55)' : 'rgba(56,189,248,0.45)';
-      ctx.lineWidth = 9; ctx.lineCap = 'round';
+      ctx.strokeStyle = alpha(COL.selRgb, sel ? 0.5 : 0.26);
+      ctx.lineWidth = sel ? 10 : 8; ctx.lineCap = 'round';
       ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
     }
     // members
     ctx.lineCap = 'round';
+    const failed = [];
     for (const e of M.members) {
       const a = P.get(e.n1), b = P.get(e.n2);
       const mr = showRes ? memberRes(r, e) : null;
       let color = COL.member, width = 2.6;
-      if (showRes && mr) { color = memberColor(mr, scaleMax); width = 3.2; }
-      else if (info.mode === 'mechanism') { color = mechNodes.has(e.n1) || mechNodes.has(e.n2) ? COL.mech : '#6b7a8f'; }
+      if (showRes && mr) { color = memberColor(mr, scaleMax); width = mr.state === 'compression' ? 3.8 : 3.2; } // compression a little heavier: not colour alone
+      else if (info.mode === 'mechanism') { color = mechNodes.has(e.n1) || mechNodes.has(e.n2) ? COL.mech : COL.ghost; }
       if (mr && mr.status !== 'safe') {
-        ctx.strokeStyle = 'rgba(248,113,113,0.28)'; ctx.lineWidth = 11;
+        ctx.strokeStyle = alpha(COL.failRgb, 0.32); ctx.lineWidth = 12;
         ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+        failed.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
       }
       ctx.strokeStyle = color; ctx.lineWidth = width;
-      ctx.setLineDash(mr && mr.state === 'zero' ? [6, 4] : []);
+      ctx.setLineDash(mr && mr.state === 'zero' ? [6, 4] : info.mode === 'mechanism' && mechNodes.has(e.n1) && mechNodes.has(e.n2) ? [7, 4] : []);
       ctx.beginPath();
       if (mr && mr.status === 'buckled') { // bowed shape for buckled members
         const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1;
@@ -612,6 +653,7 @@
       ctx.stroke();
       ctx.setLineDash([]);
     }
+    drawPredictionMarks(P);
 
     if (state.s.showSupports) for (const n of M.nodes) if (n.support.type !== 'none') drawSupport(n, O.get(n));
     if (showRes && state.s.showReactions) drawReactions(r, P);
@@ -622,18 +664,26 @@
       const [x, y] = P.get(n);
       const sel = state.sel.nodes.has(n), hov = hoverObj === n, start = state.memberStart && state.memberStart.node === n;
       if (sel || hov || start) {
-        ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2);
-        ctx.strokeStyle = sel ? COL.sel : start ? COL.reaction : COL.hover; ctx.lineWidth = 2; ctx.stroke();
+        ctx.beginPath(); ctx.arc(x, y, 8.5, 0, Math.PI * 2);
+        ctx.strokeStyle = start ? COL.accent : COL.sel; ctx.lineWidth = sel || start ? 2.2 : 1.4;
+        ctx.setLineDash(hov && !sel && !start ? [3, 2] : []); ctx.stroke(); ctx.setLineDash([]);
       }
-      ctx.beginPath(); ctx.arc(x, y, 4.2, 0, Math.PI * 2);
+      ctx.beginPath(); ctx.arc(x, y, 4.4, 0, Math.PI * 2);
       ctx.fillStyle = mechNodes && mechNodes.has(n) ? COL.mech : COL.node;
-      ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = COL.nodeStroke; ctx.stroke();
-      if (info.mode !== 'model' && state.s.showUndeformed) {
+      ctx.fill(); ctx.lineWidth = 1.6; ctx.strokeStyle = COL.nodeStroke; ctx.stroke();
+      if (info.mode !== 'model' && !hide && state.s.showUndeformed) {
         const [ox, oy] = O.get(n);
         if (Math.hypot(ox - x, oy - y) > 3) { ctx.beginPath(); ctx.arc(ox, oy, 2.6, 0, Math.PI * 2); ctx.strokeStyle = COL.ghost; ctx.lineWidth = 1.2; ctx.stroke(); }
       }
     }
+    // failed members carry a ✕ badge, so failure is never shown by colour alone
+    for (const [x, y] of failed) {
+      ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2); ctx.fillStyle = COL.bg; ctx.fill();
+      ctx.lineWidth = 1.6; ctx.strokeStyle = COL.fail; ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x - 3.4, y - 3.4); ctx.lineTo(x + 3.4, y + 3.4); ctx.moveTo(x + 3.4, y - 3.4); ctx.lineTo(x - 3.4, y + 3.4); ctx.stroke();
+    }
     drawLabels(P, r, showRes);
+    drawFbdHighlight(P);
     drawToolOverlay(info);
     updateHud(info);
   }
@@ -660,29 +710,30 @@
     ctx.moveTo(Math.round(ax) + 0.5, 0); ctx.lineTo(Math.round(ax) + 0.5, state.H);
     ctx.moveTo(0, Math.round(ay) + 0.5); ctx.lineTo(state.W, Math.round(ay) + 0.5);
     ctx.stroke();
-    ctx.fillStyle = COL.gridText; ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = COL.gridText; ctx.font = `12px ${MONO}`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    const lab = (v) => String(parseFloat(v.toPrecision(10)));
-    for (let i = Math.ceil(x0 / major); i * major <= x1; i++) { const sx = w2s(i * major, 0)[0]; if (sx > 30) ctx.fillText(lab(i * major), sx, state.H - 4); }
+    const lab = (v) => String(parseFloat(v.toPrecision(10))).replace('-', MINUS);
+    for (let i = Math.ceil(x0 / major); i * major <= x1; i++) { const sx = w2s(i * major, 0)[0]; if (sx > 34) ctx.fillText(lab(i * major), sx, state.H - 4); }
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    for (let j = Math.ceil(y0 / major); j * major <= y1; j++) { const sy = w2s(0, j * major)[1]; if (sy < state.H - 20) ctx.fillText(lab(j * major), 4, sy); }
+    for (let j = Math.ceil(y0 / major); j * major <= y1; j++) { const sy = w2s(0, j * major)[1]; if (sy < state.H - 22) ctx.fillText(lab(j * major), 4, sy); }
   }
   function drawAxisTriad() {
-    const x = 26, y = state.H - 50;
+    const x = state.W - 58, y = state.H - 64;
     ctx.save();
-    ctx.lineWidth = 1.5; ctx.font = `10px ${MONO}`; ctx.textBaseline = 'middle';
-    ctx.strokeStyle = '#e57373'; ctx.fillStyle = '#e57373'; arrow(x, y, x + 26, y, 6); ctx.fillText('x', x + 31, y);
-    ctx.strokeStyle = '#81c784'; ctx.fillStyle = '#81c784'; arrow(x, y, x, y - 26, 6); ctx.textAlign = 'center'; ctx.fillText('y', x, y - 33);
+    ctx.lineWidth = 1.5; ctx.font = `12px ${SANS}`; ctx.textBaseline = 'middle';
+    ctx.strokeStyle = COL.text2; ctx.fillStyle = COL.text2;
+    arrow(x, y, x + 26, y, 6); ctx.fillText('x', x + 31, y);
+    arrow(x, y, x, y - 26, 6); ctx.textAlign = 'center'; ctx.fillText('y', x, y - 34);
     ctx.restore();
   }
-  function arrow(x0, y0, x1, y1, head) {
+  function arrow(x0, y0, x1, y1, head, open) {
     const a = Math.atan2(y1 - y0, x1 - x0);
     ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
     ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x1 - head * Math.cos(a - 0.42), y1 - head * Math.sin(a - 0.42));
+    ctx.moveTo(x1 - head * Math.cos(a - 0.42), y1 - head * Math.sin(a - 0.42));
+    ctx.lineTo(x1, y1);
     ctx.lineTo(x1 - head * Math.cos(a + 0.42), y1 - head * Math.sin(a + 0.42));
-    ctx.closePath(); ctx.fill();
+    if (open) ctx.stroke(); else { ctx.closePath(); ctx.fill(); }
   }
   /** Support glyph drawn in a frame rotated by `deg` (world CCW), apex at the node. */
   function drawSupport(n, at) {
@@ -705,7 +756,7 @@
     const T = (lx, ly) => [at[0] + lx * c - ly * sn, at[1] - (lx * sn + ly * c)];
     const color = s.type === 'custom' ? COL.custom : COL.support;
     ctx.save();
-    ctx.strokeStyle = color; ctx.fillStyle = 'rgba(143,163,187,0.12)'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = color; ctx.fillStyle = alpha(COL.supportRgb, 0.12); ctx.lineWidth = 1.5;
     const h = 13, w = 9;
     ctx.beginPath();
     let p = T(0, -4); ctx.moveTo(p[0], p[1]);
@@ -723,7 +774,7 @@
     ctx.stroke();
     const st = nodeSettlement(state.model, n); // the active load case's settlement, on a fixed axis
     if ((s.fixX && st.dx !== 0) || (s.fixY && st.dy !== 0)) {
-      ctx.fillStyle = COL.custom; ctx.font = `bold 11px ${SANS}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = COL.custom; ctx.font = `600 13px ${SANS}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
       const q = T(w + 8, -h / 2);
       ctx.fillText('δ', q[0], q[1]);
     }
@@ -735,8 +786,8 @@
     for (const n of M.nodes) { const L = nodeLoad(M, n); fmax = Math.max(fmax, Math.hypot(L.fx, L.fy)); }
     if (!(fmax > 0)) return;
     ctx.save();
-    ctx.strokeStyle = COL.load; ctx.fillStyle = COL.load; ctx.lineWidth = 2;
-    ctx.font = `11px ${MONO}`;
+    ctx.strokeStyle = COL.load; ctx.fillStyle = COL.load; ctx.lineWidth = 2.2;
+    ctx.font = `12px ${MONO}`;
     for (const n of M.nodes) {
       const L = nodeLoad(M, n), fx = L.fx * lf, fy = L.fy * lf, F = Math.hypot(fx, fy);
       if (!(F > 0)) continue;
@@ -744,27 +795,32 @@
       const ux = fx / F, uy = -fy / F;
       const [x, y] = P.get(n);
       const hx = x - ux * 7, hy = y - uy * 7, tx = hx - ux * len, ty = hy - uy * len;
-      arrow(tx, ty, hx, hy, 8);
+      ctx.strokeStyle = COL.load; ctx.fillStyle = COL.load;
+      arrow(tx, ty, hx, hy, 9);
       const label = fx !== 0 && fy !== 0 ? `${fmt(F / fU(), 3)} ${state.s.forceUnit} ∠${fmt(Math.atan2(fy, fx) / D2R, 3)}°` : `${fmt(F / fU(), 3)} ${state.s.forceUnit}`;
-      tag(label, tx - ux * 4, ty - uy * 4, ux > 0.3 ? 'right' : ux < -0.3 ? 'left' : 'center', uy > 0.3 ? 'bottom' : uy < -0.3 ? 'top' : 'middle', COL.load);
+      // beside the shaft, near its tail: the side to the right of a vertical arrow, above a horizontal one
+      let px = -uy, py = ux;
+      if (px < 0 || (Math.abs(px) < 1e-9 && py > 0)) { px = -px; py = -py; }
+      const lx = tx + (hx - tx) * 0.3 + px * 7, ly = ty + (hy - ty) * 0.3 + py * 7;
+      tag(label, lx, ly, Math.abs(px) > 0.3 ? 'left' : 'center', Math.abs(px) > 0.3 ? 'middle' : 'bottom', COL.load);
     }
     ctx.restore();
   }
-  /** Text label on a dark plate for legibility over members and grid. */
+  /** Text label on a plate, for legibility over members and grid. */
   function tag(text, x, y, align, baseline, color) {
     ctx.textAlign = align; ctx.textBaseline = baseline;
     const w = ctx.measureText(text).width;
     const bx = align === 'right' ? x - w : align === 'center' ? x - w / 2 : x;
-    const by = baseline === 'bottom' ? y - 14 : baseline === 'top' ? y - 2 : y - 8;
-    ctx.fillStyle = 'rgba(11,17,24,0.8)';
-    ctx.fillRect(bx - 3, by, w + 6, 16);
+    const by = baseline === 'bottom' ? y - 15 : baseline === 'top' ? y - 2 : y - 9;
+    ctx.fillStyle = COL.plate;
+    ctx.fillRect(bx - 4, by, w + 8, 18);
     ctx.fillStyle = color;
     ctx.fillText(text, x, y);
   }
   function drawReactions(r, P) {
     ctx.save();
     ctx.strokeStyle = COL.reaction; ctx.fillStyle = COL.reaction; ctx.lineWidth = 2;
-    ctx.font = `11px ${MONO}`;
+    ctx.font = `12px ${MONO}`;
     const ref = r.summary.Fref;
     for (const n of state.model.nodes) {
       const nr = nodeRes(r, n);
@@ -776,11 +832,12 @@
         if (!fixed || Math.abs(val) <= 1e-9 * ref) continue;
         const sg = Math.sign(val), ux = ex * sg, uy = -ey * sg;
         const hx = x - ux * 8, hy = y - uy * 8, len = 40, tx = hx - ux * len, ty = hy - uy * len;
-        arrow(tx, ty, hx, hy, 8);
+        ctx.strokeStyle = COL.reaction; ctx.fillStyle = COL.reaction;
+        arrow(tx, ty, hx, hy, 9, true); // open arrowhead: a reaction, not an applied load
         const name = nr.rotated ? (n.support.type === 'inclined' ? 'Rn' : ax ? 'Ry′' : 'Rx′') : ax ? 'Ry' : 'Rx';
         const label = `${name} = ${fF(val, ref)} ${state.s.forceUnit}`;
         // horizontal arrows: label below the shaft so it does not hide the arrow
-        tag(label, tx - ux * 4, ty - uy * 4 + (Math.abs(ux) > 0.9 ? 11 : 0),
+        tag(label, tx - ux * 4, ty - uy * 4 + (Math.abs(ux) > 0.9 ? 12 : 0),
           ux > 0.3 ? 'right' : ux < -0.3 ? 'left' : 'center', uy > 0.3 ? 'bottom' : uy < -0.3 ? 'top' : 'middle', COL.reaction);
       }
     }
@@ -789,10 +846,15 @@
   function drawLabels(P, r, showRes) {
     const M = state.model;
     ctx.save();
-    ctx.font = `10.5px ${MONO}`;
+    ctx.font = `12px ${MONO}`;
     if (state.s.showNodeLabels) {
-      ctx.fillStyle = '#8fa3bb'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
-      M.nodes.forEach((n, i) => { const [x, y] = P.get(n); ctx.fillText(`N${i + 1}`, x + 6, y - 5); });
+      ctx.fillStyle = COL.text2; ctx.textAlign = 'left';
+      M.nodes.forEach((n, i) => {
+        const [x, y] = P.get(n), L = state.s.showLoads ? nodeLoad(M, n) : ZERO_XY;
+        const below = L.fy * state.s.loadFactor < 0; // a downward load arrow arrives from above: put the label below
+        ctx.textBaseline = below ? 'top' : 'bottom';
+        ctx.fillText(`N${i + 1}`, x + 7, below ? y + 6 : y - 6);
+      });
     }
     if (state.s.showMemberLabels || (state.s.showForceLabels && showRes)) {
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -802,13 +864,13 @@
         const parts = [];
         if (state.s.showMemberLabels) parts.push(`M${k + 1}`);
         const mr = showRes ? memberRes(r, e) : null;
-        if (state.s.showForceLabels && mr) parts.push(mr.state === 'zero' ? '0' : fF(mr.force, r.summary.Fref));
+        if (state.s.showForceLabels && mr) parts.push(mr.state === 'zero' ? '0' : `${mr.force > 0 ? '+' : ''}${fF(mr.force, r.summary.Fref)}`);
         if (!parts.length) return;
-        const t = parts.join(' · ');
-        const w = ctx.measureText(t).width + 8;
-        ctx.fillStyle = 'rgba(11,17,24,0.85)';
-        ctx.fillRect(mx - w / 2, my - 8, w, 16);
-        ctx.fillStyle = mr ? (mr.state === 'zero' ? '#94a3b8' : mr.force > 0 ? '#93c5fd' : '#fca5a5') : '#8fa3bb';
+        const t = parts.join('  ');
+        const w = ctx.measureText(t).width + 10;
+        ctx.fillStyle = COL.plate;
+        ctx.fillRect(mx - w / 2, my - 9, w, 18);
+        ctx.fillStyle = mr ? (mr.state === 'zero' ? COL.zeroHex : mr.force > 0 ? COL.tensionHex : COL.compressionHex) : COL.text2;
         ctx.fillText(t, mx, my);
       });
     }
@@ -819,45 +881,45 @@
     if (state.drag && state.drag.type === 'box') {
       const d = state.drag;
       ctx.save();
-      ctx.fillStyle = 'rgba(56,189,248,0.08)'; ctx.strokeStyle = 'rgba(56,189,248,0.7)'; ctx.setLineDash([4, 3]);
+      ctx.fillStyle = alpha(COL.selRgb, 0.08); ctx.strokeStyle = alpha(COL.selRgb, 0.8); ctx.setLineDash([4, 3]);
       ctx.fillRect(d.x0, d.y0, p.sx - d.x0, p.sy - d.y0); ctx.strokeRect(d.x0 + 0.5, d.y0 + 0.5, p.sx - d.x0, p.sy - d.y0);
       ctx.restore();
     }
-    if (!p.inside) return;
+    if (!p.inside || isViewOnly()) return;
     if (state.tool === 'node' || state.tool === 'member') {
       const pt = resolvePoint(p.sx, p.sy);
       const [x, y] = w2s(pt.x, pt.y);
       ctx.save();
-      ctx.strokeStyle = pt.node ? COL.reaction : COL.hover; ctx.lineWidth = 1.3;
+      ctx.strokeStyle = pt.node ? COL.accent : COL.text2; ctx.lineWidth = 1.3;
       ctx.beginPath(); ctx.moveTo(x - 7, y); ctx.lineTo(x + 7, y); ctx.moveTo(x, y - 7); ctx.lineTo(x, y + 7); ctx.stroke();
       if (pt.node) { ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke(); }
       if (state.tool === 'member' && state.memberStart) {
         const st = state.memberStart;
         const [sx, sy] = st.node ? w2s(st.node.x, st.node.y) : w2s(st.x, st.y);
-        ctx.setLineDash([6, 4]); ctx.strokeStyle = COL.hover; ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]); ctx.strokeStyle = COL.accent; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(x, y); ctx.stroke();
         if (!st.node) { ctx.setLineDash([]); ctx.beginPath(); ctx.arc(sx, sy, 4, 0, Math.PI * 2); ctx.stroke(); }
         const x0 = st.node ? st.node.x : st.x, y0 = st.node ? st.node.y : st.y;
         const L = Math.hypot(pt.x - x0, pt.y - y0), ang = Math.atan2(pt.y - y0, pt.x - x0) / D2R;
         ctx.setLineDash([]);
-        ctx.font = `11px ${MONO}`; ctx.fillStyle = '#cfe8fb'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-        ctx.fillText(`L = ${fmt(L, 5)} m  θ = ${fmt(ang, 4)}°`, x + 12, y + 10);
+        ctx.font = `12px ${MONO}`; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        tag(`L = ${fmt(L, 5)} m  θ = ${fmt(ang, 4)}°`, x + 14, y + 12, 'left', 'top', COL.text1);
       } else {
-        ctx.font = `11px ${MONO}`; ctx.fillStyle = '#8fb3cc'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-        ctx.fillText(`(${fmt(pt.x, 6)}, ${fmt(pt.y, 6)})`, x + 12, y + 10);
+        ctx.font = `12px ${MONO}`;
+        tag(`(${fmt(pt.x, 6)}, ${fmt(pt.y, 6)})`, x + 14, y + 12, 'left', 'top', COL.text2);
       }
       ctx.restore();
     }
     if (state.drag && state.drag.type === 'move' && state.drag.moved && state.drag.anchor) {
       const n = state.drag.anchor, [x, y] = w2s(n.x, n.y);
-      ctx.save(); ctx.font = `11px ${MONO}`; ctx.fillStyle = '#fde68a'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-      ctx.fillText(`(${fmt(n.x, 6)}, ${fmt(n.y, 6)}) m`, x + 12, y + 10); ctx.restore();
+      ctx.save(); ctx.font = `12px ${MONO}`;
+      tag(`(${fmt(n.x, 6)}, ${fmt(n.y, 6)}) m`, x + 14, y + 12, 'left', 'top', COL.text1); ctx.restore();
     }
   }
   function updateHud(info) {
     const r = info.r;
     const lines = [];
-    if (info.mode === 'deformed') lines.push(`<b>Deflection ×${fmt(state.s.scale, 4)}</b> · dashed = undeformed`);
+    if (info.mode === 'deformed' && !resultsHidden()) lines.push(`<b>Deflection ×${fmt(state.s.scale, 4)}</b>, dashed: undeformed`);
     const ac = state.model.activeCombination;
     if (ac) lines.push(`Combination: <b>${esc(ac.name)}</b> = ${esc(combinationText(ac))}`);
     else if (state.model.loadCases.length > 1) lines.push(`Load case: <b>${esc(state.model.activeCase.name)}</b>${isGeneratedCase(state.model.activeCase) ? ' (generated)' : ''}`);
@@ -866,7 +928,8 @@
       if (!sw.complete) lines.push(`<b>Self-weight incomplete:</b> ${plural(sw.missing.length, 'member')} without density`);
     }
     if (state.s.loadFactor !== 1) lines.push(`<b>Load factor λ = ${fmt(state.s.loadFactor, 4)}</b>`);
-    if (r && r.ok) lines.push(`δmax ${fD(r.summary.maxDisp.value)} ${state.s.dispUnit} · SFmin ${fmt(r.summary.minSF.value, 3)}`);
+    if (r && r.ok && !resultsHidden()) lines.push(`δ<sub>max</sub> ${fD(r.summary.maxDisp.value)} ${state.s.dispUnit}, SF<sub>min</sub> ${fmt(r.summary.minSF.value, 3)}`);
+    if (resultsHidden()) lines.push(`<b>Results hidden</b> until ${state.learn.view === 'joints' ? 'every member force is found' : 'you check your predictions'}`);
     const html = lines.join('<br>');
     const hud = $('#hud');
     if (hud.innerHTML !== html) hud.innerHTML = html;
@@ -888,22 +951,23 @@
   }
   function clearSelection(render = true) {
     state.sel.nodes.clear(); state.sel.members.clear();
-    if (render) { renderInspector(); renderTablesIfVisible(); requestRender(); }
+    if (render) { renderInspector(); renderTablesIfVisible(); requestRender(); onSelectionChanged(); }
   }
   function selectOnly(kind, obj) {
     state.sel.nodes.clear(); state.sel.members.clear();
     if (obj) (kind === 'node' ? state.sel.nodes : state.sel.members).add(obj);
-    renderInspector(); renderTablesIfVisible(); requestRender();
+    if (obj && state.s.rightTab !== 'inspector') setRightTab('inspector'); // the selection is what the user wants to see
+    renderInspector(); renderTablesIfVisible(); requestRender(); onSelectionChanged();
   }
   function toggleSel(kind, obj) {
     const set = kind === 'node' ? state.sel.nodes : state.sel.members;
     set.has(obj) ? set.delete(obj) : set.add(obj);
-    renderInspector(); renderTablesIfVisible(); requestRender();
+    renderInspector(); renderTablesIfVisible(); requestRender(); onSelectionChanged();
   }
   function selectAll() {
     state.model.nodes.forEach((n) => state.sel.nodes.add(n));
     state.model.members.forEach((e) => state.sel.members.add(e));
-    renderInspector(); renderTablesIfVisible(); requestRender();
+    renderInspector(); renderTablesIfVisible(); requestRender(); onSelectionChanged();
   }
   function findMember(a, b) { return state.model.members.find((e) => (e.n1 === a && e.n2 === b) || (e.n1 === b && e.n2 === a)); }
   function addNodeAt(x, y, undoable = true) {
@@ -944,8 +1008,10 @@
     state.model.nodes = state.model.nodes.filter((n) => !ns.has(n));
     if (state.memberStart && state.memberStart.node && ns.has(state.memberStart.node)) state.memberStart = null;
     const mCount = before - state.model.members.length;
+    const pruned = pruneDesign(state.model); // the deflection criterion keeps only nodes that still exist
+    if (pruned && state.design) state.design.edit = null;
     clearSelection(false);
-    toast(`Deleted ${plural(nCount, 'node')} and ${plural(mCount, 'member')}`);
+    toast(`Deleted ${plural(nCount, 'node')} and ${plural(mCount, 'member')}${pruned === 'criterion' ? '; the deflection criterion lost a reference node and was removed' : pruned === 'nodes' ? '; the deleted nodes were removed from the deflection criterion' : ''}`);
     modelChanged();
   }
   function nudge(dx, dy) {
@@ -966,6 +1032,7 @@
    * ===================================================================== */
   function localPos(e) { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
   function setTool(t) {
+    if (isViewOnly() && t !== 'select' && t !== 'pan') { refuseViewOnly(); t = 'select'; }
     state.tool = t;
     if (t !== 'member') state.memberStart = null;
     $$('#tools .tool').forEach((b) => b.classList.toggle('on', b.dataset.tool === t));
@@ -975,12 +1042,12 @@
     requestRender();
   }
   const HINTS = {
-    select: 'Click to select · Shift+click adds · drag nodes to move · drag empty space for box select · Del deletes',
-    node: 'Click to place a node (snaps to grid/nodes) · or type exact X, Y above',
-    member: 'Click start node, then end node (empty space creates a node) · Esc / right-click ends the chain',
-    support: 'Choose a support type above, then click nodes · clicking a node with the same support removes it',
-    load: 'Set Fx, Fy above, then click nodes to apply · positive = +x right / +y up',
-    pan: 'Drag to pan · wheel to zoom at cursor',
+    select: 'Click to select, Shift+click to add. Drag nodes to move them, drag on empty space to box-select. Del deletes.',
+    node: 'Click to place a node (it snaps to the grid and to nodes), or type exact X and Y.',
+    member: 'Click the start node, then the end node; empty space creates a node. Esc or right-click ends the chain.',
+    support: 'Choose a support type, then click nodes. Clicking a node that already has that support removes it.',
+    load: 'Set Fx and Fy, then click nodes. Positive is +x to the right and +y up.',
+    pan: 'Drag to pan; the wheel zooms at the pointer.',
   };
   function refreshHint() { $('#sbHint').textContent = HINTS[state.tool] || ''; }
 
@@ -988,7 +1055,21 @@
     const [sx, sy] = localPos(e);
     state.pointer.sx = sx; state.pointer.sy = sy;
     hideTooltip();
+    closeMenus();
+    if (e.pointerType === 'touch') {
+      state.touches.set(e.pointerId, [sx, sy]);
+      if (state.touches.size === 2) { if (state.drag && state.drag.snap && state.drag.moved) restoreSnapshot(state.drag.snap); pinchStart(); return; }
+      if (state.touches.size > 2) return;
+    }
     if (e.button === 2 && state.tool === 'member' && state.memberStart) { state.memberStart = null; requestRender(); return; }
+    if (isViewOnly() && e.button === 0 && state.tool !== 'pan' && !state.spaceDown) {
+      // view-only: a tap selects (to inspect), a drag pans; nothing is edited
+      const hit = pick(sx, sy);
+      if (hit) { selectOnly(hit.kind, hit.obj); return; }
+      state.drag = { type: 'pan', sx, sy, cx: state.view.cx, cy: state.view.cy, moved: false, tap: true };
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
     if (e.button === 1 || e.button === 2 || state.tool === 'pan' || state.spaceDown) {
       state.drag = { type: 'pan', sx, sy, cx: state.view.cx, cy: state.view.cy, moved: false };
       canvas.setPointerCapture(e.pointerId);
@@ -1091,6 +1172,8 @@
     const inside = sx >= 0 && sy >= 0 && sx <= state.W && sy <= state.H && e.target === canvas;
     state.pointer.sx = sx; state.pointer.sy = sy; state.pointer.inside = inside || !!state.drag;
     const d = state.drag;
+    if (e.pointerType === 'touch' && state.touches.has(e.pointerId)) state.touches.set(e.pointerId, [sx, sy]);
+    if (d && d.type === 'pinch') { pinchMove(); return; }
     if (d) {
       if (d.type === 'pan') {
         state.view.cx = d.cx - (sx - d.sx) / state.view.zoom;
@@ -1129,12 +1212,20 @@
     if ((hit && hit.obj) !== prev || state.tool === 'node' || state.tool === 'member') requestRender();
     if (hit) showTooltip(hit, sx, sy); else hideTooltip();
   });
+  const endTouch = (e) => {
+    if (e.pointerType !== 'touch') return false;
+    state.touches.delete(e.pointerId);
+    if (state.drag && state.drag.type === 'pinch') { if (state.touches.size < 2) { state.drag = null; scheduleSave(); } return true; }
+    return false;
+  };
+  window.addEventListener('pointercancel', (e) => { endTouch(e); if (state.drag && state.drag.type !== 'move') state.drag = null; canvas.classList.remove('panning', 'dragging'); });
   window.addEventListener('pointerup', (e) => {
+    if (endTouch(e)) return;
     const d = state.drag;
     if (!d) return;
     state.drag = null;
     canvas.classList.remove('panning', 'dragging');
-    if (d.type === 'pan') { scheduleSave(); return; }
+    if (d.type === 'pan') { if (d.tap && !d.moved) clearSelection(); scheduleSave(); return; }
     if (d.type === 'move') {
       if (d.moved) { modelChanged({ keepInspector: true }); syncInspectorInputs(); renderInspectorResults(); }
       return;
@@ -1147,7 +1238,7 @@
       const inBox = (n) => { const [px, py] = w2s(n.x, n.y); return px >= x0 && px <= x1 && py >= y0 && py <= y1; };
       state.model.nodes.forEach((n) => { if (inBox(n)) state.sel.nodes.add(n); });
       state.model.members.forEach((m) => { if (inBox(m.n1) && inBox(m.n2)) state.sel.members.add(m); });
-      renderInspector(); renderTablesIfVisible(); requestRender();
+      renderInspector(); renderTablesIfVisible(); requestRender(); onSelectionChanged();
     }
   });
   canvas.addEventListener('pointerleave', () => { if (!state.drag) { state.pointer.inside = false; state.hover = null; hideTooltip(); requestRender(); } });
@@ -1177,9 +1268,14 @@
   }
   window.addEventListener('keydown', (e) => {
     if (!$('#helpModal').hidden) { if (e.key === 'Escape') toggleHelp(false); return; }
+    if (e.key === 'Escape' && anyMenuOpen()) { closeMenus(); return; }
     if (isTyping(e.target)) { if (e.key === 'Escape') e.target.blur(); return; }
     if (nativeKey(e.target, e.key)) return;
     const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
+    // view-only (phones): shortcuts that would edit the model are refused; viewing shortcuts still work
+    if (isViewOnly() && ((mod && (k === 'z' || k === 'y')) || (!mod && !e.altKey && ['n', 'm', 's', 'l', 'delete', 'backspace', 'arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(k)))) {
+      e.preventDefault(); refuseViewOnly(); return;
+    }
     if (mod) {
       if (k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
       else if (k === 'y') { e.preventDefault(); redo(); }
@@ -1226,31 +1322,31 @@
     let h = '';
     switch (state.tool) {
       case 'node':
-        h = `<label>X <input class="num w6" id="toX" placeholder="0" title="Exact x (m). Expressions allowed"></label>
-             <label>Y <input class="num w6" id="toY" placeholder="0" title="Exact y (m). Expressions allowed"></label><span class="dim">m</span>
-             <button class="btn sm" id="toAddNode">Add node</button><span class="sep"></span><span class="hint">${HINTS.node}</span>`;
+        h = `<span class="tool-name">Node</span>
+             <label>X <input class="num w6" id="toX" placeholder="0" title="Exact x (m). Expressions allowed"></label>
+             <label>Y <input class="num w6" id="toY" placeholder="0" title="Exact y (m). Expressions allowed"></label><span class="u">m</span>
+             <button class="btn sm" id="toAddNode">Add node</button>`;
         break;
       case 'member':
-        h = `<label>Section <select class="select" id="toGroup">${state.model.groups.map((g, i) => `<option value="${i}" ${g === state.activeGroup ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select></label>
+        h = `<span class="tool-name">Member</span><label>Section <select class="select" id="toGroup">${state.model.groups.map((g, i) => `<option value="${i}" ${g === state.activeGroup ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select></label>
              <span class="sep"></span>
-             <label>From N<input class="num w4" id="toFrom"></label><label>to N<input class="num w4" id="toTo"></label>
+             <label>From N <input class="num w4" id="toFrom" aria-label="Start node number"></label><label>to N <input class="num w4" id="toTo" aria-label="End node number"></label>
              <button class="btn sm" id="toConnect">Connect</button>
              <label class="chk" title="Continue drawing from the end node"><input type="checkbox" id="toChain" ${state.s.chain ? 'checked' : ''}> Chain</label>`;
         break;
       case 'support':
-        h = `<label>Type <select class="select" id="toSupType">${SUPPORT_TYPES.filter(([k]) => k !== 'none').map(([k, l]) => `<option value="${k}" ${k === state.supTool.type ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-             <label id="toAngleWrap" ${state.supTool.type === 'inclined' ? '' : 'hidden'}>Surface α <input class="num w5" id="toAngle" value="${inVal(state.supTool.angle)}"> °</label>
-             <span class="sep"></span><span class="hint">${HINTS.support}</span>`;
+        h = `<span class="tool-name">Support</span><label>Type <select class="select" id="toSupType">${SUPPORT_TYPES.filter(([k]) => k !== 'none').map(([k, l]) => `<option value="${k}" ${k === state.supTool.type ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+             <label id="toAngleWrap" ${state.supTool.type === 'inclined' ? '' : 'hidden'}>Surface α <input class="num w5" id="toAngle" value="${inVal(state.supTool.angle)}"> °</label>`;
         break;
       case 'load':
-        h = `<label>Fx <input class="num w6" id="toFx" value="${inVal(state.loadTool.fx / fU())}"></label>
-             <label>Fy <input class="num w6" id="toFy" value="${inVal(state.loadTool.fy / fU())}"></label><span class="dim">${fu}</span>
+        h = `<span class="tool-name">Load</span><label>F<sub>x</sub> <input class="num w6" id="toFx" value="${inVal(state.loadTool.fx / fU())}"></label>
+             <label>F<sub>y</sub> <input class="num w6" id="toFy" value="${inVal(state.loadTool.fy / fU())}"></label><span class="u">${fu}</span>
              <label>Mode <select class="select" id="toLoadMode"><option value="set">Set</option><option value="add">Add</option><option value="clear">Clear</option></select></label>
-             <span class="sep"></span><span class="hint">Click nodes to apply</span>`;
+             <span class="hint">in “${esc((state.model.activeCombination || state.model.activeCase).name)}”</span>`;
         break;
-      case 'pan': h = `<span class="hint">${HINTS.pan}</span>`; break;
-      default: h = `<span class="hint">${HINTS.select}</span>`;
+      default: h = ''; // select and pan have no options; their hint is in the status bar
     }
+    if (isViewOnly()) h = '';
     box.innerHTML = h;
     const on = (id, ev, fn) => { const el = $('#' + id); if (el) el.addEventListener(ev, fn); };
     const addNode = () => {
@@ -1341,8 +1437,8 @@
   function statusBadge(mr) {
     if (mr.status === 'yielded') return '<span class="badge yielded">Yielded</span>';
     if (mr.status === 'buckled') return '<span class="badge buckled">Buckled</span>';
-    if (mr.state === 'zero') return '<span class="badge zero">Safe · zero-force</span>';
-    if (mr.lowSF) return '<span class="badge low">Safe · SF &lt; target</span>';
+    if (mr.state === 'zero') return '<span class="badge zero">Safe, zero force</span>';
+    if (mr.lowSF) return '<span class="badge low">Safe, below target</span>';
     return '<span class="badge safe">Safe</span>';
   }
 
@@ -1478,9 +1574,9 @@
           <button class="icon-btn" data-mf="del" title="${used.get(m) ? 'Used by section groups' : 'Delete material'}">&#10005;</button>
         </div>
         <div class="mat-props">
-          <label>E <input class="num" data-mf="E" value="${inVal(m.E / GPA)}" title="Young's modulus, GPa"><span class="u">GPa</span></label>
-          <label>σ<sub>y</sub> <input class="num" data-mf="fy" value="${inVal(m.fy / MPA)}" title="Yield / limit stress, MPa"><span class="u">MPa</span></label>
-          <label>ρ <input class="num" data-mf="density" value="${validDensity(m.density) ? inVal(m.density) : ''}" placeholder="not set" title="Density for self-weight, kg/m³ (steel 7850, aluminium 2700, Douglas fir about 540 at 12 % moisture content). Empty means not set: members of this material then carry no self-weight."><span class="u">kg/m³</span></label>
+          <label><span class="sym">E</span> <input class="num" data-mf="E" value="${inVal(m.E / GPA)}" title="Young's modulus, GPa" aria-label="Young's modulus E of ${esc(m.name)}, GPa"><span class="u">GPa</span></label>
+          <label><span class="sym">σ<sub>y</sub></span> <input class="num" data-mf="fy" value="${inVal(m.fy / MPA)}" title="Yield or limit stress, MPa" aria-label="Yield stress of ${esc(m.name)}, MPa"><span class="u">MPa</span></label>
+          <label><span class="sym">ρ</span> <input class="num" data-mf="density" aria-label="Density of ${esc(m.name)}, kg/m³" value="${validDensity(m.density) ? inVal(m.density) : ''}" placeholder="not set" title="Density for self-weight, kg/m³ (steel 7850, aluminium 2700, Douglas fir about 540 at 12 % moisture content). Empty means not set: members of this material then carry no self-weight."><span class="u">kg/m³</span></label>
         </div>
         ${m.preset === 'fir' ? `<div class="mat-note">${esc(FIR_NOTE)}</div>` : ''}
       </div>`).join('');
@@ -1535,7 +1631,7 @@
         <span class="swatch" style="background:${esc(g.color)}"></span>
         <span class="grp-name">${esc(g.name)}</span>
         <span class="grp-count" title="Members using this group">${count.get(g) || 0}</span>
-        <span class="grp-meta">${esc(g.material.name)} · A ${fmt(g.A / MM2, 4)} mm² · I ${fmt(g.I / MM4, 3)} mm⁴</span>
+        <span class="grp-meta">${esc(g.material.name)}, A ${fmt(g.A / MM2, 4)} mm², I ${fmt(g.I / MM4, 3)} mm⁴</span>
       </div>`).join('');
     box.querySelectorAll('.grp-row').forEach((row) => {
       const g = state.model.groups[+row.dataset.gi];
@@ -1564,8 +1660,8 @@
           <label>Area A</label><div class="inline"><input class="num" data-gf="A" value="${inVal(g.A / MM2)}" ${custom ? '' : 'disabled'}><span class="u">mm²</span></div>
           <label>I (weak axis)</label><div class="inline"><input class="num" data-gf="I" value="${inVal(g.I / MM4)}" ${custom ? '' : 'disabled'}><span class="u">mm⁴</span></div>
         </div>
-        <div class="derived">r = √(I/A) = ${fmt(r / MM, 4)} mm · EA = ${fmt(g.material.E * g.A / 1e6, 4)} MN<br>
-          σy·A = ${fmt(g.material.fy * g.A / fU(), 4)} ${state.s.forceUnit} · λc = π√(E/σy) = ${fmt(Math.PI * Math.sqrt(g.material.E / g.material.fy), 4)}</div>
+        <div class="derived">r = √(I/A) = ${fmt(r / MM, 4)} mm, EA = ${fmt(g.material.E * g.A / 1e6, 4)} MN<br>
+          σy·A = ${fmt(g.material.fy * g.A / fU(), 4)} ${state.s.forceUnit}, λc = π√(E/σy) = ${fmt(Math.PI * Math.sqrt(g.material.E / g.material.fy), 4)}</div>
         <div class="btn-row">
           <button class="btn sm" data-gf="assign" title="Assign this section to the selected members">Assign to selected</button>
           <button class="btn sm" data-gf="select" title="Select all members of this group">Select members</button>
@@ -1646,6 +1742,7 @@
     $('#selForceUnit').value = s.forceUnit; $('#selDispUnit').value = s.dispUnit; $('#selDigits').value = String(s.sig);
     $('#rngLoadFactor').value = String(clamp(s.loadFactor, 0, 3));
     if (document.activeElement !== $('#numLoadFactor')) $('#numLoadFactor').value = inVal(s.loadFactor);
+    $('#lfEcho').textContent = `λ = ${fmt(s.loadFactor, 4)}`;
     if (document.activeElement !== $('#numTargetSF')) $('#numTargetSF').value = inVal(s.targetSF);
     syncMatrixUI();
     $('#sbSnap').textContent = `snap ${s.snap ? s.grid + ' m' : 'off'}`;
@@ -1720,8 +1817,9 @@
     else if (ms.length === 1 && !ns.length) h = memberForm(ms[0]);
     else if (ns.length + ms.length > 1) h = multiForm(ns, ms);
     else h = summaryView();
-    box.innerHTML = h;
-    $('#inspectorSub').textContent = ns.length + ms.length ? `${plural(ns.length, 'node')}, ${plural(ms.length, 'member')} selected` : 'nothing selected';
+    // view-only (phones): the same forms, disabled, so values can be read but not changed
+    box.innerHTML = isViewOnly() ? `<fieldset class="edit" disabled>${h}</fieldset>` : h;
+    $('#inspectorSub').textContent = ns.length + ms.length > 1 ? `${ns.length + ms.length} selected` : '';
     bindInspector(box, ns, ms);
     renderInspectorResults();
   }
@@ -1754,12 +1852,12 @@
       </div>`;
     return `
       <div class="ins-title"><h4>Node N${nodeNo(n)}<small>${esc(nodeSupportText(n))}</small></h4><button class="btn sm danger" data-act="del">Delete</button></div>
-      <div class="sub-h">Coordinates</div>
+      <div class="sub-h">Position</div>
       <div class="form-grid">
         <label>X</label><div class="inline">${numIn('x', n.x, 'title="Expressions allowed, e.g. 2.5*sqrt(3)"')}<span class="u">m</span></div>
         <label>Y</label><div class="inline">${numIn('y', n.y, 'title="Expressions allowed, e.g. 2.5*sqrt(3)"')}<span class="u">m</span></div>
       </div>
-      <div class="sub-h">Support / boundary condition</div>
+      <div class="sub-h">Support</div>
       <div class="form-grid">${sup}</div>${warn}${gen || ac ? '' : settle}${loadPart}
       <div class="sub-h">Results</div><div id="insResults"></div>`;
   }
@@ -1849,7 +1947,7 @@
       </dl>
       <div class="tip"><ul>
         <li>Click a node or member to inspect and edit it exactly.</li>
-        <li><kbd>N</kbd> nodes · <kbd>M</kbd> members · <kbd>S</kbd> supports · <kbd>L</kbd> loads · <kbd>?</kbd> help.</li>
+        <li><kbd>N</kbd> nodes, <kbd>M</kbd> members, <kbd>S</kbd> supports, <kbd>L</kbd> loads, <kbd>?</kbd> help.</li>
         <li>Box-select several items to assign supports, loads or sections in one go.</li>
       </ul></div>`;
   }
@@ -1867,6 +1965,7 @@
     return v;
   }
   function onInspectorField(el, ns, ms) {
+    if (refuseViewOnly()) { renderInspector(); return; }
     const f = el.dataset.f, n = ns[0], e = ms[0];
     if (f === 'title') { pushUndo(); state.model.title = el.value.trim().slice(0, 120) || 'Untitled truss'; scheduleSave(); return; } // the file reader's limits
     if (f === 'stype') { pushUndo(); setSupport(n, el.value); modelChanged(); return; } // keeps the frame angle, 0° included
@@ -1914,6 +2013,7 @@
     syncInspectorInputs();
   }
   function onInspectorAction(act, ns, ms, box) {
+    if (refuseViewOnly()) return;
     if (act === 'del') { deleteSelection(); return; }
     if (act === 'flip') { pushUndo(); const e = ms[0]; [e.n1, e.n2] = [e.n2, e.n1]; modelChanged(); return; }
     const q = (k) => box.querySelector(`[data-m="${k}"]`);
@@ -1940,6 +2040,101 @@
     const vals = { x: n.x, y: n.y, fx: L.fx / fU(), fy: L.fy / fU(), fmag: F / fU(), fang: F > 0 ? Math.atan2(L.fy, L.fx) / D2R : 0, sdx: st.dx / dU(), sdy: st.dy / dU() };
     for (const [k, v] of Object.entries(vals)) { const el = box.querySelector(`[data-f="${k}"]`); if (el && el !== document.activeElement) { el.value = inVal(v); el.classList.remove('invalid'); } }
   }
+  /* ---------- worked calculations (milestone 7): formatting of the quantities from education.js ---------- */
+  const SI_UNIT = { length: 'm', disp: 'm', force: 'N', stress: 'Pa', modulus: 'Pa', area: 'm²', inertia: 'm⁴', stiffness: 'N/m', ratio: '', strain: '', angle: '°' };
+  const SUP = { '-': '⁻', '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹' };
+  /** A number in scientific notation with a real times sign: 2.000 × 10¹¹ (display only; the value is unchanged). */
+  function sci(x, sig) {
+    if (x === Infinity) return '∞';
+    if (x === -Infinity) return MINUS + '∞';
+    if (typeof x !== 'number' || Number.isNaN(x)) return '—';
+    if (x === 0) return '0';
+    const ax = Math.abs(x);
+    if (ax >= 1e-2 && ax < 1e5) return fmt(x, sig);
+    const [m, e] = x.toExponential(Math.max(0, (sig || state.s.sig) - 1)).split('e');
+    return `${m.replace(/^-/, MINUS)} × 10${String(+e).split('').map((c) => SUP[c] || c).join('')}`;
+  }
+  /** Typesets plain-text math from education.js: K_ff → K<sub>ff</sub>, SF_yield → SF<sub>yield</sub> (escaped first). */
+  const mathHtml = (t) => esc(t).replace(/([A-Za-zσεδθλγρΣκ|])_([A-Za-z0-9′]+)/g, '$1<sub>$2</sub>');
+  /** A quantity in SI base units, as substituted in an equation. */
+  const qSI = (x) => `${sci(x.value)}${SI_UNIT[x.kind] ? ` ${SI_UNIT[x.kind]}` : ''}`;
+  /** The same quantity in the units chosen under View (force, displacement) and the usual input units. */
+  function qShow(x) {
+    const v = x.value;
+    switch (x.kind) {
+      case 'force': return `${fF(v)} ${state.s.forceUnit}`;
+      case 'disp': return `${fD(v)} ${state.s.dispUnit}`;
+      case 'stress': return `${fS(v)} MPa`;
+      case 'modulus': return `${fmt(v / GPA)} GPa`;
+      case 'area': return `${fmt(v / MM2)} mm²`;
+      case 'inertia': return `${fmt(v / MM4)} mm⁴`;
+      case 'stiffness': return `${fmt(v / (STIFF_UNITS[state.s.mtxUnit] || 1e3))} ${state.s.mtxUnit}`;
+      case 'length': return `${fmt(v)} m`;
+      case 'angle': return `${fmt(v)}°`;
+      default: return fmt(v);
+    }
+  }
+  /** One worked step: the equation, the substitution with the solver's values (SI), the result, and what it means. */
+  function calcStep(step, meaning) {
+    const byS = new Map(step.terms.map((t) => [t.sym, t]));
+    // a negative value right after an operator is put in brackets: "− (−0.0159 m)", never "− −0.0159 m"
+    const sub = step.subst.map((p, i) => {
+      if (!byS.has(p)) return mathHtml(p);
+      const t = byS.get(p), v = `<span class="v">${esc(qSI(t))}</span>`, prev = i > 0 ? String(step.subst[i - 1]).trimEnd() : '';
+      return t.value < 0 && /[−+×/]$/.test(prev) ? `(${v})` : v;
+    }).join('');
+    const res = step.result;
+    const extra = (step.extra || []).map((x) => `${mathHtml(x.sym)} = ${esc(qShow(x))}`).join(',  ');
+    const showUnit = res.kind !== 'ratio' && res.kind !== 'strain' && res.kind !== 'angle' && SI_UNIT[res.kind] !== '';
+    return `<li><div class="step-label">${esc(step.title)}</div>
+      <div class="equation">${mathHtml(step.equation)}</div>
+      <div class="step-math">${sub}</div>
+      <div class="step-math">${mathHtml(res.sym)} = <span class="v">${esc(qSI(res))}</span>${showUnit ? ` <span class="dim">(${esc(qShow(res))})</span>` : ''}</div>
+      ${extra ? `<div class="step-math dim">${extra}</div>` : ''}
+      ${meaning ? `<p class="meaning">${meaning}</p>` : ''}
+      ${step.note ? `<p class="meaning">${esc(step.note)}</p>` : ''}
+      <details class="vars-more"><summary>Symbols</summary><table class="vars">${step.terms.concat([res]).map((t) => `<tr><td>${mathHtml(t.sym)}</td><td>${esc(t.name)}</td><td>${esc(qShow(t))}</td></tr>`).join('')}</table></details></li>`;
+  }
+  /** What each member step means, in words, from the solver's values. */
+  function memberMeaning(id, mr) {
+    const z = mr.state === 'zero';
+    switch (id) {
+      case 'deformation': return z ? 'Its length does not change (within the solver\'s tolerance).' : `The member gets ${fD(Math.abs(mr.elong))} ${state.s.dispUnit} ${mr.elong > 0 ? 'longer' : 'shorter'}.`;
+      case 'force': return z ? 'N is zero within the solver\'s tolerance: a <b>zero-force member</b>. It still braces the joints it connects.'
+        : mr.force > 0 ? 'Positive N: <b class="t-sign">tension (+)</b>. The member is stretched, so it pulls on the joints at its ends.'
+          : 'Negative N: <b class="c-sign">compression (−)</b>. The member is squeezed, so it pushes on the joints at its ends.';
+      case 'stress': return z ? '' : `|σ| is ${fmt(100 * Math.abs(mr.stress) / mr.fy, 3)} % of the yield stress σ<sub>y</sub> = ${fS(mr.fy)} MPa.`;
+      case 'buckling': return `The compressive force is ${fmt(100 * Math.abs(mr.force) / mr.Pcr, 3)} % of the load at which an ideal pin-ended member would buckle.`;
+      case 'governing': return mr.status !== 'safe' ? `SF below 1: the member ${mr.status === 'buckled' ? 'buckles' : 'yields'} in this idealised check.`
+        : mr.lowSF ? `Safe (SF ≥ 1), but below the target safety factor ${fmt(state.s.targetSF, 3)}.` : `Safe, and at or above the target safety factor ${fmt(state.s.targetSF, 3)}.`;
+      default: return '';
+    }
+  }
+  function memberCalcHtml(e, r, mr) {
+    const k = r.memberIndex.get(e), calc = EDU ? EDU.memberCalc(state.model, r, k) : null;
+    if (!calc) return '';
+    const z = mr.state === 'zero', open = openIfGuided();
+    const head = `<div class="headline"><span class="hl-label">Axial force N</span>
+      <span class="hl-value ${z ? '' : mr.force > 0 ? 't-sign' : 'c-sign'}">${z ? '0' : `${mr.force > 0 ? '+' : ''}${fF(mr.force, r.summary.Fref)}`} <small>${state.s.forceUnit}</small></span>
+      <span class="hl-state">${z ? 'zero force' : mr.force > 0 ? 'tension' : 'compression'}</span> ${statusBadge(mr)}</div>`;
+    return `${head}
+      <details class="explain" ${open}><summary>How N is calculated</summary><div class="calc"><ol>${calc.steps.map((s) => calcStep(s, memberMeaning(s.id, mr))).join('')}</ol></div></details>
+      <details class="explain" ${open}><summary>Strength and buckling checks</summary><div class="calc"><ol>${calc.checks.map((s) => calcStep(s, memberMeaning(s.id, mr))).join('')}</ol></div>
+        <p class="assume">Assumptions: pin-jointed, linear elastic, small displacements, loads at nodes only; Euler buckling of an ideal pin-ended member (K = 1) about the weak-axis I. An educational check, not a design-code check.</p></details>`;
+  }
+  function nodeCalcHtml(n, r) {
+    const i = r.nodeIndex.get(n), calc = EDU ? EDU.nodeCalc(state.model, r, i) : null;
+    if (!calc) return '';
+    const j = calc.joint, open = openIfGuided();
+    let meaningR = '';
+    if (j.R.supported) {
+      const parts = j.members.map((m) => `M${m.member + 1} ${m.state === 'zero' ? 'carries nothing' : m.N > 0 ? 'pulls the node toward' : 'pushes the node away from'}${m.state === 'zero' ? '' : ` N${m.other + 1}`}`);
+      meaningR = `The support supplies whatever force keeps this joint in equilibrium: ${parts.join(', ')}${j.F.fx || j.F.fy ? ', and the applied load acts on it too' : ''}. The reaction balances them.`;
+    }
+    return `<details class="explain" ${open}><summary>How these values are found</summary><div class="calc"><ol>${calc.steps.map((s) => calcStep(s, s.id === 'reaction' ? meaningR : '')).join('')}</ol></div>
+      ${typeof openFbdFor === 'function' ? `<div class="btn-row"><button class="btn sm" data-act="fbd">Open the free-body diagram of N${i + 1}</button></div>` : ''}</details>`;
+  }
+
   function renderInspectorResults() {
     const box = $('#insResults');
     if (!box) return;
@@ -1947,7 +2142,8 @@
     const ns = [...state.sel.nodes], ms = [...state.sel.members];
     const fu = state.s.forceUnit, du = state.s.dispUnit;
     if (!r || !r.ok) {
-      box.innerHTML = `<p class="note">${!r ? 'No results yet.' : r.mechanism ? 'Not available: the structure is unstable.' : 'Not available: the model cannot be analysed (see the health report).'}</p>`;
+      const why = resultsHidden() ? (state.learn.view === 'joints' ? 'Hidden until you have found every member force in the Learn panel.' : 'Hidden until you check your predictions in the Learn panel.') : !r ? 'No results yet.' : r.mechanism ? 'Not available: the structure is unstable, so it has no unique solution.' : 'Not available: the model cannot be analysed (see Results).';
+      box.innerHTML = `<p class="note">${why}</p>`;
       if (ms.length === 1 && !ns.length) box.innerHTML = memberGeometry(ms[0]) + box.innerHTML;
       return;
     }
@@ -1960,13 +2156,15 @@
         <dt>u<sub>y</sub></dt><dd>${fD(nr.uy, ref)} ${du}</dd>
         <dt>|u|</dt><dd>${fD(nr.u, ref)} ${du}</dd>`;
       if (nr.rotated) h += `<dt>u<sub>x′</sub>, u<sub>y′</sub></dt><dd>${fD(nr.uLocal[0], ref)}, ${fD(nr.uLocal[1], ref)} ${du}</dd>`;
-      if (!nr.active) h += '<dt>Note</dt><dd class="warn">isolated: excluded</dd>';
+      if (!nr.active) h += '<dt>Note</dt><dd class="warn">not connected: left out</dd>';
       if (nr.restrained[0] || nr.restrained[1]) {
         h += `<dt>R<sub>x</sub></dt><dd>${fF(nr.rx, fref)} ${fu}</dd><dt>R<sub>y</sub></dt><dd>${fF(nr.ry, fref)} ${fu}</dd>
               <dt>|R|</dt><dd>${fF(Math.hypot(nr.rx, nr.ry), fref)} ${fu}</dd>`;
         if (nr.rotated) h += `<dt>R<sub>x′</sub>, R<sub>y′</sub></dt><dd>${fF(nr.rLocal[0], fref)}, ${fF(nr.rLocal[1], fref)} ${fu}</dd>`;
       }
-      box.innerHTML = h + '</dl>';
+      box.innerHTML = h + '</dl>' + (nr.active ? nodeCalcHtml(n, r) : '');
+      const fb = box.querySelector('[data-act="fbd"]');
+      if (fb) fb.addEventListener('click', () => openFbdFor(n));
       return;
     }
     if (ms.length === 1 && !ns.length) {
@@ -1978,29 +2176,30 @@
       let ke = `<table class="ke-table"><tr><th></th>${labels.map((l) => `<th>${l}</th>`).join('')}</tr>`;
       for (let a = 0; a < 4; a++) ke += `<tr><th>${labels[a]}</th>${[0, 1, 2, 3].map((b) => `<td class="${a === b ? 'diag' : ''}">${fmt(chop(mr.ke[a * 4 + b], mr.k) / ku, 4)}</td>`).join('')}</tr>`;
       ke += '</table>';
-      box.innerHTML = memberGeometry(e) + `
-        <div class="sub-h">Results</div>
+      const tech = isTechnical() ? 'open' : '';
+      box.innerHTML = memberGeometry(e) + `<div class="sub-h">Results</div>${memberCalcHtml(e, r, mr)}
+        <details class="more" ${tech}><summary>All values</summary>
         <dl class="kv">
-          <dt>Axial force F</dt><dd>${z ? '0' : fF(mr.force, ref)} ${fu} <small>${z ? 'zero-force' : mr.state}</small></dd>
-          <dt>Stress σ = F/A</dt><dd>${z ? '0' : fS(mr.stress)} MPa</dd>
-          <dt>Strain ε = ΔL/L</dt><dd>${z ? '0' : fmt(mr.strain)}</dd>
-          <dt>Elongation ΔL</dt><dd>${z ? '0' : fD(mr.elong)} ${du}</dd>
+          <dt>Axial force N</dt><dd>${z ? '0' : fF(mr.force, ref)} ${fu} <small>${z ? 'zero force' : mr.state}</small></dd>
+          <dt>Stress σ = N/A</dt><dd>${z ? '0' : fS(mr.stress)} MPa</dd>
+          <dt>Strain ε = δ/L</dt><dd>${z ? '0' : fmt(mr.strain)}</dd>
+          <dt>Change of length δ</dt><dd>${z ? '0' : fD(mr.elong)} ${du}</dd>
           <dt>Euler P<sub>cr</sub> = π²EI/L²</dt><dd>${fF(mr.Pcr)} ${fu}</dd>
-          <dt>σ<sub>cr</sub> / σ<sub>y</sub></dt><dd>${fmt(mr.sigmaCr / MPA)} / ${fmt(mr.fy / MPA)} MPa</dd>
-          <dt>Slenderness L/r</dt><dd>${fmt(mr.slenderness, 4)}${mr.eulerValid ? '' : ' <small>(yield governs)</small>'}</dd>
+          <dt>σ<sub>cr</sub>, σ<sub>y</sub></dt><dd>${fmt(mr.sigmaCr / MPA)}, ${fmt(mr.fy / MPA)} MPa</dd>
+          <dt>Slenderness L/r</dt><dd>${fmt(mr.slenderness, 4)}${mr.eulerValid ? '' : ' <small>yield governs</small>'}</dd>
           <dt>SF yield</dt><dd>${fmt(mr.sfYield, 4)}</dd>
           <dt>SF buckling</dt><dd>${fmt(mr.sfBuckling, 4)}</dd>
           <dt>Governing SF</dt><dd class="${mr.status !== 'safe' ? 'bad' : mr.lowSF ? 'warn' : 'ok'}">${fmt(mr.sf, 4)} <small>${mr.governs}</small></dd>
           <dt>Status</dt><dd>${statusBadge(mr)}</dd>
-        </dl>
-        <div class="sub-h">Element stiffness [kᵉ] <span style="text-transform:none">(${state.s.mtxUnit})</span></div>${ke}
-        <p class="note">EA/L = ${fmt(mr.k / ku, 6)} ${state.s.mtxUnit}, c = cos θ = ${fmt(mr.c, 6)}, s = sin θ = ${fmt(mr.s, 6)}</p>`;
+        </dl></details>
+        <details class="more" ${tech}><summary>Element stiffness [kᵉ] (${state.s.mtxUnit})</summary>${ke}
+        <p class="note">E·A/L = ${fmt(mr.k / ku, 6)} ${state.s.mtxUnit}, c = cos θ = ${fmt(mr.c, 6)}, s = sin θ = ${fmt(mr.s, 6)}</p></details>`;
       return;
     }
     if (ns.length + ms.length > 1 && ms.length) {
       let fmax = 0, sfmin = Infinity;
       ms.forEach((e) => { const mr = memberRes(r, e); if (mr) { fmax = Math.max(fmax, Math.abs(mr.force)); sfmin = Math.min(sfmin, mr.sf); } });
-      box.innerHTML = `<div class="sub-h">Selected members</div><dl class="kv"><dt>max |F|</dt><dd>${fF(fmax)} ${fu}</dd><dt>min SF</dt><dd>${fmt(sfmin, 4)}</dd></dl>`;
+      box.innerHTML = `<div class="sub-h">Selected members</div><dl class="kv"><dt>Largest |N|</dt><dd>${fF(fmax)} ${fu}</dd><dt>Lowest SF</dt><dd>${fmt(sfmin, 4)}</dd></dl>`;
       return;
     }
     box.innerHTML = '';
@@ -2008,7 +2207,7 @@
   function memberGeometry(e) {
     const dx = e.n2.x - e.n1.x, dy = e.n2.y - e.n1.y, L = Math.hypot(dx, dy);
     const g = e.group;
-    return `<div class="sub-h">Geometry &amp; properties</div><dl class="kv">
+    return `<div class="sub-h">Geometry and section</div><dl class="kv">
       <dt>Length L</dt><dd>${fmt(L, 7)} m</dd>
       <dt>Angle θ</dt><dd>${fmt(Math.atan2(dy, dx) / D2R, 6)}°</dd>
       <dt>Material</dt><dd>${esc(g.material.name)}</dd>
@@ -2023,14 +2222,21 @@
   function refreshResults() {
     refreshStatus();
     renderHealth();
+    // with nothing selected the Inspector shows the model summary, whose Maxwell count comes from the result:
+    // redraw it after each solve (it was drawn before the solve when a model is opened), unless it is being typed in
+    const insp = $('#inspector');
+    if (!state.sel.nodes.size && !state.sel.members.size && !(insp && insp.contains(document.activeElement))) renderInspector();
     renderInspectorResults();
     renderLegend();
     renderTablesIfVisible();
     refreshCounts();
+    renderModelSub();
+    refreshLearnLive();
+    if (state.s.workspace === 'design') refreshDesignLive();
   }
   function refreshCounts() {
     const M = state.model;
-    $('#sbCounts').textContent = `${plural(M.nodes.length, 'node')} · ${plural(M.members.length, 'member')} · ${2 * M.nodes.length} DOF`;
+    $('#sbCounts').textContent = `${plural(M.nodes.length, 'node')}, ${plural(M.members.length, 'member')}, ${2 * M.nodes.length} DOFs`;
   }
   function firstMsg(r) { return r.errors && r.errors.length ? r.errors[0].msg : ''; }
   function refreshStatus() {
@@ -2039,7 +2245,13 @@
     let cls = '', text = 'Ready', bcls = '', btext = '';
     if (!state.model.members.length) {
       text = 'Empty model';
-      bcls = 'info'; btext = 'Start drawing: press <kbd>N</kbd> to place nodes and <kbd>M</kbd> to connect them, or choose one of the <b>Examples…</b>';
+      bcls = 'info'; btext = isViewOnly() ? 'This model is empty. Open an example from the <b>File</b> menu.'
+        : 'Start drawing: press <kbd>N</kbd> to place nodes and <kbd>M</kbd> to connect them, open an example from <b>File</b>, or follow the guided activity in <b>Learn</b>.';
+    } else if (resultsHidden()) {
+      const joints = state.learn.view === 'joints';
+      cls = ''; text = joints ? 'Method of joints: results are hidden' : 'Predict first: results are hidden';
+      bcls = 'predict'; btext = joints ? '<span><b>Method of joints</b>: find each member force by hand in the Learn panel. The solver\'s results stay hidden until every member is found.</span>'
+        : '<span><b>Prediction</b>: choose tension, compression or zero force for each member in the Learn panel, then check your answers. The results stay hidden until then.</span>';
     } else if (state.stale && !live) {
       cls = 'warn'; text = 'Results out of date: press Solve';
     } else if (!r) {
@@ -2049,21 +2261,23 @@
         cls = 'bad'; text = `UNSTABLE: ${plural(r.mechanism.nullity, 'mechanism mode')}`;
         const mode = r.mechanism.modes[state.mechMode];
         bcls = 'bad';
-        btext = `<span>⚠ <b>Unstable structure</b>: mode ${state.mechMode + 1}/${r.mechanism.modes.length} animated. ${esc(mode ? mode.description : '')}</span>` +
+        btext = `<span><b>✕ Unstable structure</b>: mode ${state.mechMode + 1} of ${r.mechanism.modes.length} ${REDUCED_MOTION.matches ? 'shown' : 'animated'}. ${esc(mode ? mode.description : '')}</span>` +
           (r.mechanism.modes.length > 1 ? '<button class="btn sm" id="btnNextMode">Next mode</button>' : '');
       } else {
-        cls = 'warn'; text = 'Cannot analyse model';
-        bcls = 'warn'; btext = `<span>${esc(firstMsg(r))}</span>`;
+        cls = 'warn'; text = 'Cannot analyse the model';
+        bcls = 'warn'; btext = `<span><b>! Cannot analyse</b>: ${esc(firstMsg(r))}</span>`;
       }
     } else {
       const sm = r.summary;
-      if (sm.failures.length) { cls = 'bad'; text = `${plural(sm.failures.length, 'member')} failed · SF min ${fmt(sm.minSF.value, 3)}`; }
-      else if (sm.counts.low) { cls = 'warn'; text = `Solved · SF min ${fmt(sm.minSF.value, 3)} < target ${fmt(state.s.targetSF, 3)}`; }
-      else { cls = 'ok'; text = `Solved · all members safe · SF min ${fmt(sm.minSF.value, 3)}`; }
+      if (sm.failures.length) { cls = 'bad'; text = `${plural(sm.failures.length, 'member')} failed, SF min ${fmt(sm.minSF.value, 3)}`; }
+      else if (sm.counts.low) { cls = 'warn'; text = `Solved: SF min ${fmt(sm.minSF.value, 3)} is below the target ${fmt(state.s.targetSF, 3)}`; }
+      else { cls = 'ok'; text = `Solved: all members within limits, SF min ${fmt(sm.minSF.value, 3)}`; }
     }
     pill.className = `pill ${cls}`;
     pill.textContent = text;
     pill.title = text;
+    $('#resultsTabStatus').textContent = cls === 'ok' ? ' ✓' : cls === 'warn' ? ' !' : cls === 'bad' ? ' ✕' : '';
+    $('#resultsTabStatus').className = `tab-status ${cls}`;
     banner.hidden = !btext;
     banner.className = `banner ${bcls}`;
     banner.innerHTML = btext;
@@ -2074,16 +2288,18 @@
   function renderLegend() {
     const lg = $('#legend');
     const r = R();
-    if (!r || !r.ok || !state.s.showDeformed) { lg.hidden = true; return; }
+    if (!r || !r.ok || !state.s.showDeformed || resultsHidden()) { lg.hidden = true; return; }
     const by = state.s.colorBy;
     const mx = colorScaleMax(r);
     let title, lo, hi;
-    if (by === 'util') { title = 'Utilisation 1/SF'; lo = 'C 100%'; hi = 'T 100%'; }
-    else if (by === 'stress') { title = 'Axial stress σ'; lo = `${fmt(-mx / MPA, 3)} MPa`; hi = `${fmt(mx / MPA, 3)} MPa`; }
-    else { title = 'Axial force F'; lo = `${fmt(-mx / fU(), 3)} ${state.s.forceUnit}`; hi = `${fmt(mx / fU(), 3)} ${state.s.forceUnit}`; }
-    lg.innerHTML = `<div class="lg-title"><span>${title}</span><span>×${fmt(state.s.scale, 3)}</span></div>
-      <div class="lg-bar"></div><div class="lg-scale"><span>${lo}</span><span>0</span><span>${hi}</span></div>
-      <div class="lg-keys"><span><i style="background:#ef4444"></i>Compression</span><span><i style="background:#3b82f6"></i>Tension</span><span><i style="background:#6b7280"></i>Zero</span></div>`;
+    if (by === 'util') { title = 'Utilisation 1/SF'; lo = 'C 100 %'; hi = 'T 100 %'; }
+    else if (by === 'stress') { title = 'Axial stress σ'; lo = `${fmt(-mx / MPA, 3)} MPa`; hi = `+${fmt(mx / MPA, 3)} MPa`; }
+    else { title = 'Axial force N'; lo = `${fmt(-mx / fU(), 3)} ${state.s.forceUnit}`; hi = `+${fmt(mx / fU(), 3)} ${state.s.forceUnit}`; }
+    // the bar runs compression (−) through zero to tension (+), in the same colours as the members
+    const bar = `linear-gradient(90deg, ${mix(COL.zero, COL.compression, 1)}, ${mix(COL.zero, COL.compression, 0.4)}, ${COL.zeroHex}, ${mix(COL.zero, COL.tension, 0.4)}, ${mix(COL.zero, COL.tension, 1)})`;
+    lg.innerHTML = `<div class="lg-title"><span>${title}</span><span>deflection ×${fmt(state.s.scale, 3)}</span></div>
+      <div class="lg-bar" style="background:${bar}"></div><div class="lg-scale"><span>${lo}</span><span>0</span><span>${hi}</span></div>
+      <div class="lg-keys"><span><i style="background:${COL.compressionHex};height:4px"></i>− compression</span><span><i style="background:${COL.tensionHex}"></i>+ tension</span><span><i class="dash"></i>0 zero force</span></div>`;
     lg.hidden = false;
   }
   /**
@@ -2120,6 +2336,10 @@
     const box = $('#health');
     const r = state.res, fu = state.s.forceUnit, du = state.s.dispUnit;
     const msgs = (list, cls) => list.map((m) => `<li class="${cls}${m.ref ? ' link' : ''}" ${m.ref ? `data-ref="${m.ref.type}:${m.ref.index}"` : ''}>${esc(m.msg)}</li>`).join('');
+    if (resultsHidden()) {
+      box.innerHTML = `<div class="health-status idle"><span class="ic">○</span><div>Results hidden<small>${state.learn.view === 'joints' ? 'Find every member force in the Learn panel: the results appear here.' : 'Make your predictions in the Learn panel, then check them: the results appear here.'}</small></div></div>`;
+      return;
+    }
     if (!r || (state.stale && !state.s.liveSolve)) {
       box.innerHTML = `<div class="health-status idle"><span class="ic">○</span><div>${!r ? 'No analysis yet' : 'Results out of date'}<small>Press Solve (Enter) or turn on Live.</small></div></div>`;
       return;
@@ -2146,34 +2366,34 @@
     }
     const sm = r.summary, c = sm.counts, fref = sm.Fref;
     const mNo = (k) => `M${k + 1}`;
-    if (sm.failures.length) h += `<div class="health-status bad"><span class="ic">✕</span><div>${plural(sm.failures.length, 'member')} exceed capacity<small>${c.yielded} yielded · ${c.buckled} buckled</small></div></div>`;
+    if (sm.failures.length) h += `<div class="health-status bad"><span class="ic">✕</span><div>${plural(sm.failures.length, 'member')} exceed capacity<small>${c.yielded} yielded, ${c.buckled} buckled</small></div></div>`;
     else if (c.low) h += `<div class="health-status warn"><span class="ic">!</span><div>Safe, but ${plural(c.low, 'member')} below target SF ${fmt(state.s.targetSF, 3)}<small>Governing SF ${fmt(sm.minSF.value, 3)} (${sm.minSF.governs})</small></div></div>`;
-    else h += `<div class="health-status ok"><span class="ic">✓</span><div>Stable · all members within limits<small>Governing SF ${fmt(sm.minSF.value, 3)}${sm.minSF.member >= 0 ? ` at ${mNo(sm.minSF.member)} (${sm.minSF.governs})` : ''}</small></div></div>`;
+    else h += `<div class="health-status ok"><span class="ic">✓</span><div>Stable: all members within limits<small>Governing SF ${fmt(sm.minSF.value, 3)}${sm.minSF.member >= 0 ? ` at ${mNo(sm.minSF.member)} (${sm.minSF.governs})` : ''}</small></div></div>`;
     const sfCls = sm.minSF.value < 1 ? 'bad' : sm.minSF.value < state.s.targetSF ? 'warn' : 'ok';
     const pk = sm.peakStress;
     h += `<dl class="kv">
-      <dt>Max deflection</dt><dd>${fD(sm.maxDisp.value)} ${du} <small>N${sm.maxDisp.node + 1}${Number.isFinite(sm.spanRatio) ? ` · span/${fmt(sm.spanRatio, 3)}` : ''}</small></dd>
+      <dt>Max deflection</dt><dd>${fD(sm.maxDisp.value)} ${du} <small>at N${sm.maxDisp.node + 1}</small></dd>
       <dt>Max |u<sub>x</sub>|, |u<sub>y</sub>|</dt><dd>${fD(Math.abs(sm.maxUx.value))}, ${fD(Math.abs(sm.maxUy.value))} ${du}</dd>
       <dt>Peak stress</dt><dd>${pk.member >= 0 ? `${fS(pk.value)} MPa <small>${mNo(pk.member)} ${pk.value > 0 ? 'T' : 'C'}</small>` : '0'}</dd>
       <dt>Peak tension</dt><dd>${sm.maxTension.member >= 0 ? `${fF(sm.maxTension.value)} ${fu} <small>${mNo(sm.maxTension.member)}</small>` : '\u2014'}</dd>
       <dt>Peak compression</dt><dd>${sm.maxCompression.member >= 0 ? `${fF(sm.maxCompression.value)} ${fu} <small>${mNo(sm.maxCompression.member)}</small>` : '\u2014'}</dd>
-      <dt>Critical SF</dt><dd class="${sfCls}">${fmt(sm.minSF.value, 4)}${sm.minSF.member >= 0 ? ` <small>${mNo(sm.minSF.member)} · ${sm.minSF.governs}</small>` : ''}</dd>
-      <dt>Members</dt><dd>${c.tension} T · ${c.compression} C · ${c.zero} zero</dd>
-      <dt>Status</dt><dd>${c.safe} safe · <span class="${c.yielded ? 'check-bad' : ''}">${c.yielded} yielded</span> · <span class="${c.buckled ? 'check-bad' : ''}">${c.buckled} buckled</span></dd>
+      <dt>Critical SF</dt><dd class="${sfCls}">${fmt(sm.minSF.value, 4)}${sm.minSF.member >= 0 ? ` <small>${mNo(sm.minSF.member)}, ${sm.minSF.governs}</small>` : ''}</dd>
+      <dt>Members</dt><dd>${c.tension} T, ${c.compression} C, ${c.zero} zero</dd>
+      <dt>Status</dt><dd>${c.safe} safe, <span class="${c.yielded ? 'check-bad' : ''}">${c.yielded} yielded</span>, <span class="${c.buckled ? 'check-bad' : ''}">${c.buckled} buckled</span></dd>
     </dl>`;
     if (state.model.activeCombination) h += combinationBlock();
     else if (isGeneratedCase(state.model.activeCase)) h += selfWeightBlock();
-    h += `<div class="sub-h">Buckling risk <span style="text-transform:none">(P<sub>cr</sub>/|F| &lt; ${fmt(Math.max(state.s.targetSF, 1), 3)})</span></div>`;
+    h += `<div class="sub-h">Buckling risk <small>P<sub>cr</sub>/|N| below ${fmt(Math.max(state.s.targetSF, 1), 3)}</small></div>`;
     if (sm.bucklingRisk.length) {
       h += `<ul class="risk-list">${sm.bucklingRisk.slice(0, 12).map((b) => {
         const mr = r.members[b.member];
-        return `<li data-ref="member:${b.member}" title="Select member"><span>${mNo(b.member)} · |F| ${fF(-mr.force, fref)} / P<sub>cr</sub> ${fF(mr.Pcr)} ${fu}</span><span class="${b.sf < 1 ? 'bad' : 'warn'}">SF ${fmt(b.sf, 3)}</span></li>`;
+        return `<li data-ref="member:${b.member}" title="Select member"><span>${mNo(b.member)}: |N| ${fF(-mr.force, fref)} of P<sub>cr</sub> ${fF(mr.Pcr)} ${fu}</span><span class="${b.sf < 1 ? 'bad' : 'warn'}">SF ${fmt(b.sf, 3)}</span></li>`;
       }).join('')}</ul>${sm.bucklingRisk.length > 12 ? `<p class="note">… and ${sm.bucklingRisk.length - 12} more</p>` : ''}`;
     } else h += '<p class="note">No compression member is close to its Euler load.</p>';
     if (sm.failures.length) {
       h += `<div class="sub-h">Failed members</div><ul class="risk-list">${sm.failures.slice(0, 12).map((k) => {
         const mr = r.members[k];
-        return `<li data-ref="member:${k}"><span>${mNo(k)} · ${mr.status} · σ ${fS(mr.stress)} MPa</span><span class="bad">SF ${fmt(mr.sf, 3)}</span></li>`;
+        return `<li data-ref="member:${k}"><span>${mNo(k)}: ${mr.status}, σ ${fS(mr.stress)} MPa</span><span class="bad">SF ${fmt(mr.sf, 3)}</span></li>`;
       }).join('')}</ul>`;
     }
     h += stabilityBlock(r);
@@ -2187,7 +2407,7 @@
   }
   function stabilityBlock(r) {
     const D = r.diagnostics || {};
-    let h = '<div class="sub-h">Stability &amp; numerical verification</div><dl class="kv small">';
+    let h = `<details class="more" ${isTechnical() ? 'open' : ''}><summary>Stability and numerical verification</summary><dl class="kv small">`;
     if (r.determinacy) {
       const d = r.determinacy;
       const cls = d.degree < 0 ? 'unstable' : d.degree === 0 ? 'determinate' : `indeterminate (${d.degree}°)`;
@@ -2212,7 +2432,7 @@
       h += `<dt>Equilibrium</dt><dd class="${okEq ? 'ok' : 'bad'}">${okEq ? '✓' : '✕'} rel. ${fmt(Math.max(e.relF, e.relM), 2)}</dd>`;
       h += `<dt>Nodal equilibrium</dt><dd class="${D.nodalResidualRel < 1e-8 ? 'ok' : 'bad'}">${D.nodalResidualRel < 1e-8 ? '✓' : '✕'} rel. ${fmt(D.nodalResidualRel, 2)}</dd>`;
     }
-    return h + '</dl>';
+    return h + '</dl></details>';
   }
   function bindHealth(box) {
     box.querySelectorAll('[data-ref]').forEach((el) => el.addEventListener('click', () => {
@@ -2313,7 +2533,7 @@
     }
     box.innerHTML = h + '</tbody></table>';
     bindTable(box, 'members', 'member');
-    $('#tabInfo').textContent = ok ? `T > 0 · C < 0 · SF = min(σy/|σ|, Pcr/|F|) · λ = ${fmt(state.s.loadFactor, 4)}` : '';
+    $('#tabInfo').textContent = ok ? `Tension +, compression −; SF = min(σy/|σ|, Pcr/|N|); λ = ${fmt(state.s.loadFactor, 4)}` : '';
   }
   function renderNodesTable() {
     const box = $('#tab-nodes');
@@ -2355,6 +2575,7 @@
 
   /* ---------- stiffness matrix inspector ---------- */
   function matrixData() {
+    if (resultsHidden()) return { msg: 'Hidden during the Learn exercise: the displacements in these matrices would give the answers away.' };
     const r = state.res;
     if (!r || !r.K) return { msg: r ? `Matrices are not available: ${firstMsg(r) || 'fix the validation errors first.'}` : 'Run an analysis first.' };
     const v = state.s.mtxView;
@@ -2390,7 +2611,7 @@
     const unit = STIFF_UNITS[state.s.mtxUnit] || 1;
     let nnz = 0, sym = true;
     for (let a = 0; a < d.n; a++) for (let b = 0; b < d.n; b++) { if (d.M[a * d.n + b] !== 0) nnz++; if (b > a && d.M[a * d.n + b] !== d.M[b * d.n + a]) sym = false; }
-    info.innerHTML = `${d.n} × ${d.n} · ${nnz} non-zeros · ${sym ? 'exactly symmetric' : 'not symmetric'}`;
+    info.innerHTML = `${d.n} × ${d.n}, ${nnz} non-zeros, ${sym ? 'exactly symmetric' : 'not symmetric'}`;
     $('#tabInfo').textContent = `values in ${state.s.mtxUnit}`;
     const mode = d.n > 120 ? 'heatmap' : state.s.mtxMode;
     let maxAbsV = 0;
@@ -2418,17 +2639,17 @@
     const avail = Math.max(200, Math.min(view.clientWidth - 320, 900));
     const cell = clamp(Math.floor(avail / d.n), 2, 26);
     const size = cell * d.n;
-    view.innerHTML = `<div class="mtx-legend"><b>${d.title}</b><br>Colour = sign (red −, blue +), brightness = log₁₀|k| over 8 decades. ${d.n > 120 ? 'Table view is limited to 120 DOFs.' : ''}</div>
+    view.innerHTML = `<div class="mtx-legend"><b>${d.title}</b><br>Colour shows the sign (orange −, blue +), brightness log₁₀|k| over 8 decades. ${d.n > 120 ? 'Table view is limited to 120 DOFs.' : ''}</div>
       <div class="heat-wrap"><canvas width="${size}" height="${size}" style="width:${size}px;height:${size}px"></canvas><div class="heat-readout">Hover a cell to read K[i, j].</div></div>`;
     const cv = view.querySelector('canvas'), c2 = cv.getContext('2d'), ro = view.querySelector('.heat-readout');
-    c2.fillStyle = '#0b1118'; c2.fillRect(0, 0, size, size);
+    c2.fillStyle = COL.bg; c2.fillRect(0, 0, size, size);
     const lmax = Math.log10(maxAbsV || 1);
     for (let a = 0; a < d.n; a++) for (let b = 0; b < d.n; b++) {
       const v = d.M[a * d.n + b];
       if (v === 0 || Math.abs(v) <= 1e-12 * maxAbsV) continue;
       const t = clamp((Math.log10(Math.abs(v)) - lmax + 8) / 8, 0.08, 1);
-      c2.fillStyle = v > 0 ? `rgba(59,130,246,${t})` : `rgba(239,68,68,${t})`;
-      if (a === b) c2.fillStyle = `rgba(56,189,248,${Math.max(t, 0.5)})`;
+      c2.fillStyle = alpha(v > 0 ? COL.tension : COL.compression, t);
+      if (a === b) c2.fillStyle = alpha(COL.accentRgb, Math.max(t, 0.5));
       c2.fillRect(b * cell, a * cell, cell, cell);
     }
     cv.addEventListener('mousemove', (ev) => {
@@ -2436,14 +2657,15 @@
       const b = Math.floor((ev.clientX - rc.left) / cell), a = Math.floor((ev.clientY - rc.top) / cell);
       if (a < 0 || b < 0 || a >= d.n || b >= d.n) return;
       const v = d.M[a * d.n + b];
-      ro.innerHTML = `K[${d.labels[a]}, ${d.labels[b]}]<br><b style="color:#e2e8f0">${fmt(v / unit, 8)}</b> ${state.s.mtxUnit}<br><span class="dim">row ${a + 1}, column ${b + 1}</span>`;
+      ro.innerHTML = `K[${d.labels[a]}, ${d.labels[b]}]<br><b>${fmt(v / unit, 8)}</b> ${state.s.mtxUnit}<br><span class="dim">row ${a + 1}, column ${b + 1}</span>`;
     });
   }
   function renderLog() {
     const r = state.res;
     const pre = $('#logText');
+    if (resultsHidden()) { pre.textContent = 'Hidden during the Learn exercise.'; return; }
     if (!r) { pre.textContent = 'No analysis has been run yet.'; return; }
-    const lines = [`<span class="s">TrussLab solver ${esc(FEA.VERSION)}, ${new Date().toLocaleString()} · load factor λ = ${r.loadFactor} · wall time ${fmt(r.wall, 3)} ms</span>`, ''];
+    const lines = [`<span class="s">TrussLab solver ${esc(FEA.VERSION)}, ${new Date().toLocaleString()}, load factor λ = ${r.loadFactor}, wall time ${fmt(r.wall, 3)} ms</span>`, ''];
     r.log.forEach((l, i) => lines.push(`<span class="s">[${String(i + 1).padStart(2, '0')}]</span> ${esc(l)}`));
     if (r.warnings.length) { lines.push(''); r.warnings.forEach((w) => lines.push(`<span class="w">WARNING  ${esc(w.msg)}</span>`)); }
     if (r.errors.length) { lines.push(''); r.errors.forEach((e) => lines.push(`<span class="e">ERROR    ${esc(e.msg)}</span>`)); }
@@ -2701,7 +2923,7 @@
 
   function setBottomTab(tab) {
     state.s.bottomTab = tab;
-    $$('.tabs .tab').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+    $$('.tabs .tab').forEach((b) => { const on = b.dataset.tab === tab; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); b.tabIndex = on ? 0 : -1; });
     ['members', 'nodes', 'matrix', 'log'].forEach((t) => { $(`#tab-${t}`).hidden = t !== tab; });
     if (state.s.bottomCollapsed) setBottomCollapsed(false);
     renderTablesIfVisible();
@@ -2739,6 +2961,7 @@
   }
   function loadModel(model, msg, notes) {
     state.model = model;
+    if (state.design) { state.design.edit = null; state.design.report = null; state.design.families = {}; }
     state.importNotes = notes || [];
     state.activeGroup = model.groups[0] || null;
     state.editGroup = null;
@@ -2762,6 +2985,7 @@
       loadModel(buildExample(k), `Loaded example: ${EXAMPLES.find((e) => e[0] === k)[1]}`);
     });
     $('#btnNew').addEventListener('click', () => {
+      if (refuseViewOnly()) return;
       if (state.model.nodes.length && !confirm('Start a new empty model? (You can undo this.)')) return;
       pushUndo();
       loadModel(emptyModel(), 'New model');
@@ -2792,11 +3016,9 @@
     $('#btnRedo').addEventListener('click', redo);
     $('#btnSolve').addEventListener('click', () => solve(true));
     $('#chkLive').addEventListener('change', (e) => { state.s.liveSolve = e.target.checked; scheduleSave(); if (state.s.liveSolve) solve(false); else refreshResults(); });
-    const menu = $('#exportMenu'), btn = $('#btnExport');
-    btn.addEventListener('click', (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; btn.setAttribute('aria-expanded', String(!menu.hidden)); });
-    document.addEventListener('click', () => { menu.hidden = true; btn.setAttribute('aria-expanded', 'false'); });
+    const menu = $('#exportMenu');
     menu.querySelectorAll('[data-export]').forEach((b) => b.addEventListener('click', () => {
-      menu.hidden = true;
+      closeMenus();
       ({ 'report-csv': exportReportCSV, 'report-json': exportReportJSON, 'matrices-csv': exportMatricesCSV, 'matrices-json': exportMatricesJSON, png: exportPNG, model: exportModel })[b.dataset.export]();
     }));
     $('#btnHelp').addEventListener('click', () => toggleHelp(true));
@@ -2804,7 +3026,7 @@
     $('#helpModal').addEventListener('click', (e) => { if (e.target.id === 'helpModal') toggleHelp(false); });
     $('#btnPanels').addEventListener('click', () => {
       const app = $('#app');
-      if (window.innerWidth <= 920) { // room for one side panel at a time: none -> left -> right -> none
+      if (layoutName() !== 'wide') { // room for one side panel at a time: none -> left -> right -> none
         if (app.classList.contains('show-left')) app.classList.replace('show-left', 'show-right');
         else if (app.classList.contains('show-right')) app.classList.remove('show-right');
         else app.classList.add('show-left');
@@ -2831,10 +3053,16 @@
     if (SMOKE) clearSmokeKeys();
     const session = loadSession(), restored = session.restored;
     if (!restored) state.model = buildExample('pratt');
+    // a first visit (no saved session) opens Learn; a returning user gets the workspace they left
+    if (!restored && !SMOKE && !session.readFailed) state.s.workspace = 'learn';
     state.activeGroup = state.model.groups[0] || null;
     bindTopBar();
     bindLeftPanel();
     bindBottom();
+    bindShell();
+    applyUiMode();
+    applyRightTab();
+    state.learnProgress = loadLearnProgress(); // lesson progress: its own key, read once
     document.documentElement.style.setProperty('--bottom-h', `${clamp(state.s.bottomHeight, 60, 900)}px`);
     syncSettingsUI();
     renderLeftLists();
@@ -2842,10 +3070,13 @@
     updateUndoButtons();
     new ResizeObserver(resizeCanvas).observe(viewport);
     resizeCanvas();
+    const collapsed = state.s.bottomCollapsed;
     setBottomTab(state.s.bottomTab);
-    if (state.s.bottomCollapsed) setBottomCollapsed(true);
+    setBottomCollapsed(collapsed);
     if (!restored) fitView(); else updateZoomLabel();
     renderInspector();
+    applyWorkspaceUI();
+    applyViewOnly();
     solve(true);
     refreshHint();
     const message = afterSessionLoaded(session);
@@ -2906,6 +3137,7 @@
         saveStatus: canon({ hidden: $('#sbSave').hidden, text: $('#sbSave').textContent, className: $('#sbSave').className, title: $('#sbSave').title }),
         importNotes: canon(state.importNotes),
         storageStatus: canon(storageStatus),
+        learnProgress: canon(state.learnProgress),
       });
     }
     function cancelAutosave() { clearTimeout(saveTimer); saveTimer = 0; }
@@ -2936,6 +3168,10 @@
       Object.assign($('#sbSave'), { hidden: sv.hidden, textContent: sv.text, className: sv.className, title: sv.title });
       state.importNotes = JSON.parse(snap.importNotes);
       Object.assign(storageStatus, JSON.parse(snap.storageStatus));
+      if (snap.learnProgress) { state.learnProgress = JSON.parse(snap.learnProgress); saveLearnProgress(); }
+      state.viewOnlyTest = null;
+      state.learn = { view: 'home' };
+      applyViewOnly();
       setTool(snap.tool);
       renderLeftLists();
       setBottomTab(settings.bottomTab);
@@ -2947,6 +3183,9 @@
       updateZoomLabel();
       renderInspector();
       refreshResults();
+      applyUiMode();
+      applyRightTab();
+      applyWorkspaceUI();
       resizeCanvas();
       cancelAutosave(); // the calls above schedule autosaves; the restored state must not be re-saved
     }
@@ -2957,7 +3196,8 @@
       storageKeys: KEYS,
       userStorageKey: SESSION_KEYS.v2,
       /** Every key under which TrussLab may keep a user's session: the test checks they stay unchanged. */
-      userStorageKeys: [SESSION_KEYS.v2, SESSION_KEYS.v1, SESSION_KEYS.backup].concat(Array.from({ length: 19 }, (_, i) => `${SESSION_KEYS.backup}.${i + 2}`)),
+      userStorageKeys: [SESSION_KEYS.v2, SESSION_KEYS.v1, SESSION_KEYS.backup].concat(Array.from({ length: 19 }, (_, i) => `${SESSION_KEYS.backup}.${i + 2}`))
+        .concat(window.TrussLessons ? [TrussLessons.PROGRESS_KEYS.user, `${TrussLessons.PROGRESS_KEYS.user}.unreadable`] : []), // milestone 11: lesson progress
       /** Runs start-up's session handling again, on the smoke-test keys only (this adapter exists only in smoke mode). */
       reloadStoredSession() {
         const session = loadSession();
@@ -2985,7 +3225,1217 @@
       restore,
       /** Names of the captured fields that differ between two captures. */
       diff: (a, b) => Object.keys(a).filter((k) => a[k] !== b[k]),
+      // milestone 6 (additive): the layout ('wide', 'narrow' or 'phone'), and the view-only state forced on or off
+      // for a scenario (a synthetic test cannot resize the window); restore() clears the override
+      layout: () => layoutName(),
+      viewOnly: () => isViewOnly(),
+      setViewOnlyForTest(on) { state.viewOnlyTest = on === null ? null : !!on; applyViewOnly(); },
     });
+  }
+
+  /* =====================================================================
+   * 18. Workspaces, presentation modes, menus, layout and the phone view-only mode (milestone 6)
+   *
+   * Learn, Analyze and Design are three views of the same model and the same solver: switching changes the
+   * workspace panel and the actions offered, never the model. Guided and Technical change how much is
+   * explained and how much is shown, never the data or the analysis. Phones (≤ 640 px) are view-only.
+   * ===================================================================== */
+  const PHONE_MQ = window.matchMedia ? window.matchMedia('(max-width: 640px)') : { matches: false, addEventListener() {} };
+  const NARROW_MQ = window.matchMedia ? window.matchMedia('(max-width: 1100px)') : { matches: false, addEventListener() {} };
+  /** 'wide' (both side panels), 'narrow' (one side panel at a time, ≤ 1100 px) or 'phone' (view-only, ≤ 640 px). */
+  function layoutName() { return PHONE_MQ.matches ? 'phone' : NARROW_MQ.matches ? 'narrow' : 'wide'; }
+  function isViewOnly() { return state.viewOnlyTest !== null ? state.viewOnlyTest : PHONE_MQ.matches; }
+  const isTechnical = () => state.s.uiMode === 'technical';
+  /** Explanations are open in Guided mode and closed (one click away) in Technical mode. */
+  const openIfGuided = () => (isTechnical() ? '' : 'open');
+  /** Refuses an edit, with a message, in the view-only layout. Returns true when the edit is refused. */
+  function refuseViewOnly() {
+    if (!isViewOnly()) return false;
+    toast('View only on phones: open TrussLab on a tablet or a computer to edit the model.', 'warn');
+    return true;
+  }
+  /** Applies the view-only state: editing forms are disabled, drawing tools are off, the canvas only selects and pans. */
+  function applyViewOnly() {
+    const vo = isViewOnly();
+    state.viewOnly = vo;
+    $('#app').classList.toggle('view-only', vo);
+    $$('fieldset.edit').forEach((f) => { f.disabled = vo; });
+    $$('#tools .tool').forEach((b) => { b.disabled = vo && b.dataset.tool !== 'select' && b.dataset.tool !== 'pan'; });
+    $('#phoneNote').hidden = !vo;
+    if (vo && state.tool !== 'select' && state.tool !== 'pan') setTool('select'); else renderToolOptions();
+    renderInspector();
+    refreshStatus();
+    requestRender();
+  }
+
+  /** Switches the workspace (a presentation setting, saved with the session). */
+  function setWorkspace(ws) {
+    if (!WORKSPACES.includes(ws)) return;
+    if (state.s.workspace === ws) { applyWorkspaceUI(); return; }
+    state.s.workspace = ws;
+    applyWorkspaceUI();
+    refreshResults(); renderInspector(); // the prediction activity hides results only while it is open
+    scheduleSave();
+  }
+  function applyWorkspaceUI() {
+    const ws = WORKSPACES.includes(state.s.workspace) ? state.s.workspace : 'analyze';
+    const app = $('#app');
+    WORKSPACES.forEach((w) => app.classList.toggle(`ws-${w}`, w === ws));
+    $$('.ws-nav [data-ws]').forEach((b) => { const on = b.dataset.ws === ws; b.setAttribute('aria-selected', String(on)); b.tabIndex = on ? 0 : -1; });
+    $$('#leftPanel [data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== ws; });
+    if (ws === 'learn') renderLearn();
+    if (ws === 'design') renderDesignTools();
+    renderModelSub();
+    requestRender();
+  }
+  /** Guided or Technical: re-renders the panels so that explanations open or close; the model is untouched. */
+  function setUiMode(mode) {
+    if (mode !== 'guided' && mode !== 'technical') return;
+    const was = state.s.uiMode;
+    state.s.uiMode = mode;
+    applyUiMode();
+    if (was !== mode && mode === 'technical' && state.s.bottomCollapsed) setBottomCollapsed(false); // tables are the technical default
+    renderInspector();
+    renderHealth();
+    if (state.s.workspace === 'learn') renderLearn();
+    if (state.s.workspace === 'design') renderDesignTools();
+    scheduleSave();
+  }
+  function applyUiMode() {
+    const mode = state.s.uiMode === 'technical' ? 'technical' : 'guided';
+    $('#app').classList.toggle('mode-guided', mode === 'guided');
+    $('#app').classList.toggle('mode-technical', mode === 'technical');
+    $$('.mode-toggle [data-uimode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.uimode === mode)));
+  }
+  /** The right panel: Inspector (the selection) or Results (the verdict and the report). */
+  function setRightTab(tab) {
+    if (tab !== 'inspector' && tab !== 'results') return;
+    if (state.s.rightTab !== tab) { state.s.rightTab = tab; scheduleSave(); }
+    applyRightTab();
+  }
+  function applyRightTab() {
+    const tab = state.s.rightTab === 'results' ? 'results' : 'inspector';
+    $$('.right-tabs [data-rtab]').forEach((b) => { const on = b.dataset.rtab === tab; b.setAttribute('aria-selected', String(on)); b.tabIndex = on ? 0 : -1; });
+    $('#paneInspector').hidden = tab !== 'inspector';
+    $('#paneResults').hidden = tab !== 'results';
+  }
+  /** One line under the panel heading: what the model is. */
+  function renderModelSub() {
+    const M = state.model;
+    const t = `${esc(M.title)}: ${plural(M.nodes.length, 'node')}, ${plural(M.members.length, 'member')}`;
+    $('#modelSub').innerHTML = t;
+    const ds = $('#designSub');
+    if (ds) ds.innerHTML = t;
+  }
+
+  /* ---------- menus and popovers: one behaviour for File, Export and View ---------- */
+  const MENUS = [['#btnFile', '#fileMenu'], ['#btnExport', '#exportMenu'], ['#btnView', '#viewMenu']];
+  function closeMenus(except) {
+    for (const [b, m] of MENUS) {
+      if (m === except) continue;
+      $(m).hidden = true;
+      $(b).setAttribute('aria-expanded', 'false');
+    }
+  }
+  function bindMenus() {
+    for (const [b, m] of MENUS) {
+      const btn = $(b), menu = $(m);
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = menu.hidden;
+        closeMenus(m);
+        menu.hidden = !open;
+        btn.setAttribute('aria-expanded', String(open));
+        if (open) { const first = menu.querySelector('button, select, input'); if (first && e.detail === 0) first.focus(); } // keyboard: focus the first item
+      });
+    }
+    // clicks inside a popover (the View settings) keep it open; anywhere else closes every menu
+    document.addEventListener('click', (e) => { if (!e.target.closest || !e.target.closest('.menu')) closeMenus(); });
+    $('#fileMenu').addEventListener('click', (e) => { if (e.target.closest('button')) closeMenus(); });
+  }
+  const anyMenuOpen = () => MENUS.some(([, m]) => !$(m).hidden);
+
+  /** Arrow keys move between tabs in a tab list (WAI-ARIA tabs pattern), and activate the new tab. */
+  function tabKeys(list, selector, activate) {
+    list.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return;
+      const tabs = $$(selector, list).filter((t) => !t.hidden);
+      const i = tabs.indexOf(document.activeElement);
+      if (i < 0) return;
+      e.preventDefault(); e.stopPropagation();
+      const j = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+      tabs[j].focus();
+      activate(tabs[j]);
+    });
+  }
+  function bindShell() {
+    $$('.ws-nav [data-ws]').forEach((b) => b.addEventListener('click', () => setWorkspace(b.dataset.ws)));
+    tabKeys($('.ws-nav'), '[data-ws]', (b) => setWorkspace(b.dataset.ws));
+    $$('.mode-toggle [data-uimode]').forEach((b) => b.addEventListener('click', () => setUiMode(b.dataset.uimode)));
+    $$('.right-tabs [data-rtab]').forEach((b) => b.addEventListener('click', () => setRightTab(b.dataset.rtab)));
+    tabKeys($('.right-tabs'), '[data-rtab]', (b) => setRightTab(b.dataset.rtab));
+    tabKeys($('#bottom .tabs'), '.tab', (b) => setBottomTab(b.dataset.tab));
+    bindMenus();
+    const relayout = () => { applyViewOnly(); setTimeout(resizeCanvas, 0); };
+    if (PHONE_MQ.addEventListener) PHONE_MQ.addEventListener('change', relayout);
+    if (NARROW_MQ.addEventListener) NARROW_MQ.addEventListener('change', () => { $('#app').classList.remove('show-left', 'show-right'); setTimeout(resizeCanvas, 0); });
+    // the web fonts load after the first frame; redraw the canvas labels once they are ready
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => requestRender());
+  }
+
+  /* ---------- touch: pinch to zoom, two-finger pan ---------- */
+  function pinchStart() {
+    const pts = [...state.touches.values()];
+    const [a, b] = pts;
+    state.drag = { type: 'pinch', d0: Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, m0: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], view: Object.assign({}, state.view) };
+    state.memberStart = null;
+  }
+  function pinchMove() {
+    const d = state.drag, pts = [...state.touches.values()];
+    if (pts.length < 2) return;
+    const [a, b] = pts;
+    const dist = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const zoom = clamp(d.view.zoom * dist / d.d0, 1, 20000);
+    // keep the model point under the first midpoint under the current midpoint
+    const wx = (d.m0[0] - state.W / 2) / d.view.zoom + d.view.cx, wy = d.view.cy - (d.m0[1] - state.H / 2) / d.view.zoom;
+    state.view.zoom = zoom;
+    state.view.cx = wx - (mid[0] - state.W / 2) / zoom;
+    state.view.cy = wy + (mid[1] - state.H / 2) / zoom;
+    updateZoomLabel();
+    requestRender();
+  }
+
+  /* =====================================================================
+   * 19. Learn workspace (milestones 6–11): activities driven by the real model and the real solver
+   * ===================================================================== */
+  const EDU = window.TrussEducation || null;
+  const ICON = {
+    build: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16 L10 4 L17 16 Z M3 16 H17"/><circle cx="10" cy="4" r="1.6"/></svg>',
+    example: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 15 L6 7 L10 15 L14 7 L18 15 Z M2 15 H18 M6 7 H14"/></svg>',
+    cont: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 4 L14 10 L7 16"/></svg>',
+  };
+  function learnHead(title, sub) {
+    return `<div class="act-head"><button class="btn sm quiet" data-learn="home" aria-label="Back to Learn">&#8592; Learn</button></div>
+      <div class="panel-head"><h2>${title}</h2>${sub ? `<p>${sub}</p>` : ''}</div>`;
+  }
+  /** The Learn home: continue, the guided activity, the activities and lessons added by later milestones, and examples. */
+  function learnHome() {
+    const M = state.model, items = [];
+    if (M.members.length) items.push(['analyze', ICON.cont, `Continue with “${esc(M.title)}”`, `${plural(M.nodes.length, 'node')} and ${plural(M.members.length, 'member')}: analyse it, or use it in the activities below.`, '']);
+    items.push(['build', ICON.build, 'Build your first truss', 'Five steps, each checked from your model: nodes, members, supports, a load, and the result.', guidedBuildMeta()]);
+    for (const a of learnActivities()) items.push(a);
+    const examples = EXAMPLES.filter(([k]) => ['aframe', 'pratt', 'warren', 'mechanism'].includes(k)).map(([k, label]) =>
+      `<li><button data-example="${k}"><span class="a-icon">${ICON.example}</span><span><span class="a-title">${esc(label)}</span></span><span class="a-meta">Open</span></button></li>`).join('');
+    return `<div class="panel-head"><h2>Learn</h2><p>Every number here is the solver's own.</p></div>
+      <p class="panel-intro">Learn structural mechanics on a real model: build it, predict how it behaves, and see the equations behind each result.</p>
+      <ul class="activity-list">${items.map(([k, ic, t, d, meta]) => `<li class="${meta === 'Done' ? 'done' : ''}"><button data-learn="${k}"><span class="a-icon">${ic}</span><span><span class="a-title">${t}</span><span class="a-desc">${d}</span></span><span class="a-meta">${meta}</span></button></li>`).join('')}</ul>
+      ${lessonsHomeHtml()}
+      <div class="sub-h" style="margin:var(--sp-5) var(--sp-4) var(--sp-2)">Examples to explore</div>
+      <ul class="activity-list">${examples}</ul>`;
+  }
+  function guidedBuildMeta() {
+    if (!EDU || !state.learn.buildStarted) return `${EDU ? EDU.BUILD_STEPS.length : 5} steps`;
+    const p = EDU.buildProgress(state.model, R());
+    return p.next < 0 ? 'Done' : `step ${p.next + 1} of ${p.steps.length}`;
+  }
+  /** Activities that later milestones register (prediction, free body, joints, Solver Explorer, lessons). */
+  function learnActivities() { return LEARN_ACTIVITIES.map((a) => a.item()).filter(Boolean); }
+  const LEARN_ACTIVITIES = [];
+  const LEARN_VIEWS = {}; // view name -> { render(), bind(box), live() }
+
+  /** The guided first truss: a checklist that follows the model. */
+  function learnBuildView() {
+    if (!EDU) return learnHead('Build your first truss') + '<p class="panel-intro">education.js did not load.</p>';
+    const p = EDU.buildProgress(state.model, R());
+    const empty = !state.model.nodes.length, tracking = empty || state.learn.buildStarted;
+    if (empty) state.learn.buildStarted = true;
+    if (!tracking) {
+      let h = learnHead('Build your first truss', `${p.steps.length} steps`) + '<div class="act-body">';
+      h += `<p>Build a small truss yourself, one step at a time. Each step is checked from your model as you go.</p>
+        <p class="note">This starts from an empty model. Your current model stays in the undo history, so Ctrl+Z brings it back.</p>
+        <div class="btn-row"><button class="btn primary" data-learn-act="empty">Start from an empty model</button></div><div class="calc"><ol>`;
+      p.steps.forEach((s) => { h += `<li><b>${esc(s.title)}</b></li>`; });
+      return h + '</ol></div></div>';
+    }
+    let h = learnHead('Build your first truss', p.next < 0 ? 'All five steps done' : `Step ${p.next + 1} of ${p.steps.length}`) + '<div class="act-body"><div class="calc"><ol>';
+    p.steps.forEach((s, i) => {
+      const cur = i === p.next;
+      h += `<li${cur ? ' aria-current="step"' : ''}><div><b>${s.done ? '<span class="ok" aria-label="done">✓</span> ' : ''}${esc(s.title)}</b></div>
+        ${cur || (p.next < 0 && i === p.steps.length - 1) ? `<p class="meaning">${esc(s.how)}</p><details class="explain" ${openIfGuided()}><summary>Why</summary><p>${esc(s.why)}</p></details>` : ''}</li>`;
+    });
+    h += '</ol></div>';
+    if (p.mechanism) h += '<p class="note bad-note">The truss can move without resistance (a mechanism). The canvas shows how it moves: add a member or a support to stop that movement.</p>';
+    if (p.next < 0) h += `<div class="summary-box">Your truss is stable and solved. Select a member: the Inspector shows its axial force N, its stress, and the calculation behind them.</div>`;
+    return h + '</div>';
+  }
+  LEARN_VIEWS.build = { render: learnBuildView, live: true };
+
+
+  /* ---------- prediction: tension, compression or zero force (milestone 7) ---------- */
+  ICON.predict = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10 H17 M13 6 L17 10 L13 14"/><circle cx="5" cy="10" r="1.5"/></svg>';
+  const CHOICE = { tension: ['T', 'Tension'], compression: ['C', 'Compression'], zero: ['0', 'Zero force'] };
+  /** What the predictions were made for: the model, what is analysed and whether λ = 0. A change resets them. */
+  // cached per solver result: resultsHidden() runs on every frame, and serialising a model each time would be wasteful
+  let predictKeyCache = { res: undefined, lf: undefined, key: '' };
+  function predictKey() {
+    if (predictKeyCache.res !== state.res || predictKeyCache.lf !== state.s.loadFactor) {
+      predictKeyCache = { res: state.res, lf: state.s.loadFactor, key: JSON.stringify(serialize(state.model)) + (state.s.loadFactor === 0 ? '|0' : '') };
+    }
+    return predictKeyCache.key;
+  }
+  function predictState() {
+    let p = state.learn.predict;
+    if (!p || p.key !== predictKey()) {
+      const changed = !!p;
+      p = state.learn.predict = { key: predictKey(), choices: [], revealed: false, attempts: 0, changed };
+    }
+    return p;
+  }
+  /** True while the prediction activity is open and not yet checked: every result is hidden. */
+  function resultsHidden() {
+    if (state.s.workspace !== 'learn') return false;
+    // opening an activity hides the results at once, before its panel is drawn
+    if (state.learn.view === 'predict') return !predictState().revealed;
+    if (state.learn.view === 'joints') return !jointsState().complete;
+    return false;
+  }
+  function refreshAfterPredictChange() { refreshResults(); renderInspector(); requestRender(); }
+  LEARN_ACTIVITIES.push({ item: () => ['predict', ICON.predict, 'Predict: tension or compression?', 'Decide for each member, then compare with the solver and see why each member is stretched, squeezed or unloaded.', ''] });
+
+  function predictReasonText(it, M) {
+    const why = it.reason, mNo = `M${it.member + 1}`;
+    if (why.state === 'tension') return `The solver finds δ = +${fD(why.elong)} ${state.s.dispUnit}: ${mNo} gets longer, so it is stretched and pulls on its joints (N = +${fF(why.force)} ${state.s.forceUnit}).`;
+    if (why.state === 'compression') return `The solver finds δ = ${fD(why.elong)} ${state.s.dispUnit}: ${mNo} gets shorter, so it is squeezed and pushes on its joints (N = ${fF(why.force)} ${state.s.forceUnit}).`;
+    const rule = why.rule;
+    if (rule && rule.type === 'two-members') return `At N${rule.node + 1} only two members meet, they are not in line, and no load or support acts there. Equilibrium in two directions is only possible if both carry nothing.`;
+    if (rule && rule.type === 'collinear-pair') return `At N${rule.node + 1} three members meet and two of them (${rule.others.map((k) => `M${k + 1}`).join(' and ')}) are in line. Across their line only ${mNo} could push or pull, and nothing else acts there, so it carries nothing.`;
+    return `N is zero within the solver's tolerance: for these loads, the equilibrium of the joints leaves ${mNo} unloaded. It still braces the truss; another load could load it.`;
+  }
+  function predictHint(it) {
+    if (it.correct || !it.predicted) return '';
+    if (it.actual === 'zero') return 'Look at the joints at its ends: is anything there that the member would have to balance?';
+    return 'Tip: imagine removing the member. Would its joints move apart (it was holding them together: tension) or closer (it was holding them apart: compression)?';
+  }
+  function learnPredictView() {
+    const M = state.model, r = state.res;
+    let h = learnHead('Predict: tension or compression?', 'Results stay hidden until you check');
+    h += '<div class="act-body">';
+    const ex = EDU ? EDU.PREDICTION_EXERCISES : [];
+    h += `<p>For each member, decide whether it is <b class="t-sign">stretched (tension, +)</b>, <b class="c-sign">squeezed (compression, −)</b> or <b>carries nothing (zero force, 0)</b>. Think about how the loads reach the supports. Then check: the answers come from the solver.</p>
+      <details class="explain" ${openIfGuided()}><summary>Choose a structure</summary><div class="btn-row">${ex.map((x) => `<button class="btn sm" data-predict-ex="${x.example}" title="${esc(x.note)}">${esc(x.title)}</button>`).join('')}</div><p>Or use the model on the canvas.</p></details>`;
+    if (!M.members.length || !r || !r.ok) {
+      h += `<p class="note warn-note">${!M.members.length ? 'The model has no members yet.' : r && r.mechanism ? 'This structure is unstable: it has no unique forces to predict. Choose a structure above.' : 'The model cannot be analysed yet.'}</p>`;
+      return h + '</div>';
+    }
+    const p = predictState();
+    const hasLoad = M.nodes.some((n) => { const L = nodeLoad(M, n), s = nodeSettlement(M, n); return L.fx || L.fy || s.dx || s.dy; });
+    if (!hasLoad || state.s.loadFactor === 0) h += '<p class="note warn-note">Nothing loads this structure, so every member carries zero force. Choose a structure above, or add a load.</p>';
+    if (p.changed) { h += '<p class="note">The model changed, so the predictions started again.</p>'; p.changed = false; }
+    const res = EDU.checkPredictions(M, r, p.choices);
+    const selK = state.sel.members.size === 1 ? M.members.indexOf([...state.sel.members][0]) : -1;
+    if (p.revealed) h += `<div class="score"><span>${res.correct} of ${res.total} right</span><span class="dim">attempt ${p.attempts}</span></div>`;
+    else h += `<div class="score"><span>${res.answered} of ${res.total} answered</span></div>`;
+    h += '<div class="predict-list">';
+    res.items.forEach((it) => {
+      const k = it.member, e = M.members[k];
+      const mark = p.revealed ? (it.correct ? '<span class="verdict-ok" aria-label="right">✓</span>' : '<span class="verdict-bad" aria-label="wrong">✕</span>') : '';
+      h += `<div class="predict-row${k === selK ? ' current' : ''}" data-pk="${k}">
+        <button class="btn quiet sm mid" data-pselect="${k}" title="Show M${k + 1} on the canvas">M${k + 1}</button>
+        <span class="dim">N${nodeNo(e.n1)}–N${nodeNo(e.n2)} ${mark}${p.revealed ? ` <b class="${it.actual === 'tension' ? 't-sign' : it.actual === 'compression' ? 'c-sign' : ''}">${CHOICE[it.actual][1]}</b>` : ''}</span>
+        <span class="choice" role="group" aria-label="Prediction for M${k + 1}">${EDU.STATES.map((st) => `<button data-pchoice="${st}" data-k="${k}" aria-pressed="${p.choices[k] === st}" aria-label="${CHOICE[st][1]}" title="${CHOICE[st][1]}" ${p.revealed ? 'disabled' : ''}>${CHOICE[st][0]}</button>`).join('')}</span></div>`;
+      if (p.revealed && (!it.correct || k === selK)) h += `<p class="feedback">${predictReasonText(it, M)} ${esc(predictHint(it))}</p>`;
+    });
+    h += '</div>';
+    if (!p.revealed) h += `<div class="step-nav"><span class="dim">${res.complete ? 'All answered.' : `${res.total - res.answered} to go.`}</span><button class="btn primary" data-pact="check" ${res.complete ? '' : 'disabled'}>Check my predictions</button></div>`;
+    else h += `<div class="step-nav"><button class="btn" data-pact="again" ${res.correct === res.total ? 'disabled' : ''}>Try the wrong ones again</button><button class="btn quiet" data-pact="reset">Start again</button></div>
+      ${res.correct === res.total ? '<div class="summary-box">All right. Select any member to see the calculation behind its force in the Inspector.</div>' : ''}`;
+    return h + '</div>';
+  }
+  function bindPredict(box) {
+    box.querySelectorAll('[data-predict-ex]').forEach((b) => b.addEventListener('click', () => {
+      pushUndo();
+      loadModel(buildExample(b.dataset.predictEx), `Prediction exercise: ${EXAMPLES.find((x) => x[0] === b.dataset.predictEx)[1]}`);
+      state.learn.predict = null;
+      refreshAfterPredictChange(); renderLearn();
+    }));
+    box.querySelectorAll('[data-pselect]').forEach((b) => b.addEventListener('click', () => { const e = state.model.members[+b.dataset.pselect]; if (e) selectOnly('member', e); }));
+    box.querySelectorAll('[data-pchoice]').forEach((b) => b.addEventListener('click', () => {
+      const p = predictState(), k = +b.dataset.k;
+      if (p.revealed) return;
+      p.choices[k] = p.choices[k] === b.dataset.pchoice ? null : b.dataset.pchoice;
+      renderLearn(); requestRender();
+      const again = $(`#paneLearn [data-pchoice="${b.dataset.pchoice}"][data-k="${k}"]`); if (again) again.focus();
+    }));
+    box.querySelectorAll('[data-pact]').forEach((b) => b.addEventListener('click', () => {
+      const p = predictState(), act = b.dataset.pact;
+      if (act === 'check') {
+        p.revealed = true; p.attempts++;
+        const res = EDU.checkPredictions(state.model, state.res, p.choices), ek = exampleKeyOf(state.model);
+        if (res && res.correct === res.total && ek) recordExercise(`predict:${ek}`); // lesson 2's challenge
+      }
+      else if (act === 'again') {
+        const res = EDU.checkPredictions(state.model, state.res, p.choices);
+        res.items.forEach((it) => { if (!it.correct) p.choices[it.member] = null; });
+        p.revealed = false;
+      } else if (act === 'reset') { p.choices = []; p.revealed = false; p.attempts = 0; }
+      refreshAfterPredictChange(); renderLearn();
+    }));
+  }
+  LEARN_VIEWS.predict = {
+    render: learnPredictView, bind: bindPredict, live: true,
+    enter() { predictState(); refreshAfterPredictChange(); },
+    leave() { setTimeout(refreshAfterPredictChange, 0); },
+    onSelect() { renderLearn(); const row = $('#paneLearn .predict-row.current'); if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' }); },
+  };
+  /** The learner's predictions on the canvas: a letter at each member's middle, with ✓ or ✕ once checked. */
+  function drawPredictionOverlay(P) {
+    const p = state.learn.predict;
+    if (!p || state.s.workspace !== 'learn' || state.learn.view !== 'predict' || p.key !== predictKey()) return;
+    const r = state.res, M = state.model;
+    ctx.save();
+    ctx.font = `600 12px ${SANS}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    M.members.forEach((e, k) => {
+      const ch = p.choices[k];
+      const a = P.get(e.n1), b = P.get(e.n2), x = (a[0] + b[0]) / 2, y = (a[1] + b[1]) / 2;
+      const letter = ch ? CHOICE[ch][0] : '?';
+      let mark = '';
+      if (p.revealed && ch && r && r.ok) { if (r.members[k].state === ch) return; mark = ' ✕'; } // after the check, mark only the wrong answers
+      const t = letter + mark, w = ctx.measureText(t).width + 12;
+      ctx.fillStyle = COL.bg; ctx.strokeStyle = ch ? COL.accent2 : COL.text3; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.rect(x - w / 2, y - 10, w, 20); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = mark === ' ✕' ? COL.fail : ch ? COL.text1 : COL.text3;
+      ctx.fillText(t, x, y + 0.5);
+    });
+    ctx.restore();
+  }
+
+
+  /* ---------- free-body diagram of a joint and the method of joints (milestone 8) ---------- */
+  ICON.fbd = '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="2.2"/><path d="M10 10 L3 4 M10 10 L17 4 M10 10 V18 M5 5.5 L3 4 L5.2 3.6"/></svg>';
+  ICON.joints = '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" stroke-dasharray="2.5 2"/><circle cx="10" cy="10" r="1.8"/><path d="M10 10 L16.5 6"/></svg>';
+  LEARN_ACTIVITIES.push({ item: () => ['fbd', ICON.fbd, 'Free-body diagram of a joint', 'Isolate a node: see every force on it, split into x and y, and check ΣFx = 0 and ΣFy = 0 with the solver\'s numbers.', ''] });
+  LEARN_ACTIVITIES.push({ item: () => ['joints', ICON.joints, 'Method of joints', 'Find the member forces by hand, one joint at a time, and check each answer against the solver.', jointsMeta()] });
+
+  /** The node the free-body and joints views show: the selected node, if one is selected. */
+  const selectedNode = () => (state.sel.nodes.size === 1 && !state.sel.members.size ? [...state.sel.nodes][0] : null);
+  function openFbdFor(n) {
+    setWorkspace('learn');
+    openLearnView('fbd');
+    if (n) selectOnly('node', n);
+  }
+  const fnum = (v) => fF(v, state.res && state.res.summary ? state.res.summary.Fref : 0);
+  /**
+   * The joint as an SVG drawing. Member forces lie along their members: tension arrows point away from the
+   * joint (the member pulls), compression arrows point at it (the member pushes). The load arrives at the
+   * joint; the reaction has an open arrowhead. Unknowns (method of joints) are drawn as assumed tension.
+   */
+  function fbdSvg(forces, opts) {
+    const W = 400, H = 280, cx = W / 2, cy = H / 2, gap = 12;
+    const scale = Math.max(...forces.map((f) => (f.unknown ? 0 : Math.hypot(f.fx, f.fy))), 1e-300);
+    let body = '';
+    const len = (f) => (f.unknown ? 62 : 30 + 40 * Math.min(1, Math.hypot(f.fx, f.fy) / scale));
+    const arrowHead = (x, y, ux, uy, open, color) => {
+      const a = Math.atan2(uy, ux), h = 10;
+      const p1 = [x - h * Math.cos(a - 0.42), y - h * Math.sin(a - 0.42)], p2 = [x - h * Math.cos(a + 0.42), y - h * Math.sin(a + 0.42)];
+      return open ? `<path d="M${p1} L${x},${y} L${p2}" fill="none" stroke="${color}" stroke-width="2"/>` : `<path d="M${p1} L${x},${y} L${p2} Z" fill="${color}"/>`;
+    };
+    for (const f of forces) {
+      let ux, uy, color, label, open = false, headAtJoint;
+      if (f.kind === 'member') {
+        ux = f.ex; uy = -f.ey; // SVG y points down
+        color = f.unknown ? COL.warn : f.state === 'zero' ? COL.zeroHex : f.N > 0 ? COL.tensionHex : COL.compressionHex;
+        body += `<line x1="${cx}" y1="${cy}" x2="${cx + ux * 96}" y2="${cy + uy * 96}" stroke="${color}" stroke-opacity="0.3" stroke-width="5" stroke-linecap="round"/>`;
+        label = f.unknown ? `M${f.member + 1}: N = ?` : `M${f.member + 1}: ${f.state === 'zero' ? '0' : `${f.N > 0 ? '+' : ''}${fnum(f.N)}`}`;
+        if (f.state === 'zero' && !f.unknown) { body += svgLabel(cx + ux * 82, cy + uy * 82, label, COL.text2); continue; }
+        headAtJoint = !f.unknown && f.N < 0; // compression pushes on the joint
+      } else {
+        const m = Math.hypot(f.fx, f.fy) || 1;
+        ux = f.fx / m; uy = -f.fy / m;
+        color = f.kind === 'load' ? COL.load : COL.reaction;
+        open = f.kind === 'reaction';
+        headAtJoint = true;
+        label = `${f.kind === 'load' ? 'F' : 'R'} = ${fnum(m)}`;
+        ux = -ux; uy = -uy; // drawn from outside, arriving at the joint
+      }
+      const L = len(f);
+      const x0 = cx + ux * gap, y0 = cy + uy * gap, x1 = cx + ux * (gap + L), y1 = cy + uy * (gap + L);
+      if (headAtJoint) {
+        body += `<line x1="${x1}" y1="${y1}" x2="${x0}" y2="${y0}" stroke="${color}" stroke-width="2.4"/>` + arrowHead(x0, y0, -ux, -uy, open, color);
+      } else {
+        body += `<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="${color}" stroke-width="2.4" ${f.unknown ? 'stroke-dasharray="5 3"' : ''}/>` + arrowHead(x1, y1, ux, uy, false, color);
+      }
+      body += svgLabel(cx + ux * (gap + L + 18), cy + uy * (gap + L + 18), label, color);
+    }
+    body += `<circle cx="${cx}" cy="${cy}" r="24" fill="none" stroke="${COL.accent2}" stroke-dasharray="4 3"/><circle cx="${cx}" cy="${cy}" r="5" fill="${COL.node}"/>`;
+    body += `<text x="${cx + 8}" y="${cy - 9}" class="lbl-dim">${esc(opts.title)}</text>`;
+    // axes key
+    body += `<g transform="translate(18 ${H - 18})" stroke="${COL.text3}" fill="${COL.text3}"><line x1="0" y1="0" x2="22" y2="0"/><line x1="0" y1="0" x2="0" y2="-22"/><text x="26" y="4" class="lbl-dim">x</text><text x="-4" y="-27" class="lbl-dim">y</text></g>`;
+    return `<div class="fbd"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opts.aria)}">${body}</svg></div>`;
+  }
+  function svgLabel(x, y, text, color) {
+    const anchor = Math.abs(x - 200) < 30 ? 'middle' : x > 200 ? 'start' : 'end';
+    return `<text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="${anchor}" fill="${color}" style="fill:${color}">${esc(text)}</text>`;
+  }
+  /** Components table and the two equilibrium equations, with the solver's numbers in the chosen force unit. */
+  function fbdTable(d) {
+    const fu = state.s.forceUnit;
+    const name = (f) => (f.kind === 'member' ? `M${f.member + 1} (${f.state === 'zero' ? 'zero' : f.N > 0 ? 'tension' : 'compression'})` : f.kind === 'load' ? 'Load F (λ included)' : 'Reaction R');
+    let h = `<table class="comp-table"><thead><tr><th>Force</th><th>F<sub>x</sub> [${fu}]</th><th>F<sub>y</sub> [${fu}]</th></tr></thead><tbody>`;
+    for (const f of d.forces) h += `<tr><td>${name(f)}</td><td>${fnum(f.fx)}</td><td>${fnum(f.fy)}</td></tr>`;
+    // sums at round-off level (below 1e-9 of the largest force) show as 0; the note below states the true residual
+    h += `</tbody><tfoot><tr><td>Σ</td><td>${fmt(chop(d.sumFx, d.scale * 1e3) / fU(), 3)}</td><td>${fmt(chop(d.sumFy, d.scale * 1e3) / fU(), 3)}</td></tr></tfoot></table>`;
+    const term = (v) => (v < 0 ? ` − ${fnum(-v)}` : ` + ${fnum(v)}`);
+    const eq = (comp) => `ΣF<sub>${comp}</sub> =${d.forces.map((f) => term(comp === 'x' ? f.fx : f.fy)).join('').replace(/^ \+ /, ' ')} = ${fmt(chop(comp === 'x' ? d.sumFx : d.sumFy, d.scale * 1e3) / fU(), 3)} ${fu}`;
+    h += `<div class="equation">${eq('x')}</div><div class="equation">${eq('y')}</div>`;
+    h += `<p class="note ${d.balanced ? 'ok-note' : 'bad-note'}">${d.balanced ? '✓ Both sums are zero: the joint is in equilibrium.' : '✕ The sums are not zero.'} What remains is round-off, ${fmt(Math.max(Math.abs(d.sumFx), Math.abs(d.sumFy)), 2)} N, far below the solver's zero-force tolerance of ${fmt(d.tol, 2)} N.</p>`;
+    return h;
+  }
+  function learnFbdView() {
+    const n = selectedNode(), r = R();
+    let h = learnHead('Free-body diagram of a joint', n ? `Node N${nodeNo(n)}` : 'Select a node on the canvas');
+    h += `<div class="act-body"><p>Cut a joint free from the truss. Every cut member acts on the joint with its axial force along its own line: <b class="t-sign">tension pulls the joint toward the member</b> (arrow away from the joint), <b class="c-sign">compression pushes on it</b> (arrow into the joint). Loads and support reactions act there too. A joint at rest has ΣF<sub>x</sub> = 0 and ΣF<sub>y</sub> = 0.</p>`;
+    if (!r || !r.ok) return h + `<p class="note warn-note">${r && r.mechanism ? 'The structure is unstable, so its joints have no equilibrium forces to draw.' : 'Analyse a stable, loaded model first (for example the Pratt bridge from File).'}</p></div>`;
+    h += `<div class="node-chips" role="group" aria-label="Choose a node">${state.model.nodes.map((x, i) => `<button class="btn sm ${x === n ? 'toggle on' : ''}" data-fbd-node="${i}">N${i + 1}</button>`).join('')}</div>`;
+    if (!n) return h + '<p class="note">Choose a node above, or select one on the canvas.</p></div>';
+    const i = state.model.nodes.indexOf(n), d = EDU.fbd(state.model, r, i);
+    if (!d) return h + '<p class="note">This node is not part of the analysis.</p></div>';
+    h += fbdSvg(d.forces, { title: `N${i + 1}`, aria: `Free-body diagram of node N${i + 1}` });
+    h += `<h3>Components</h3><p class="note">Each force splits into x and y parts: for a member, F<sub>x</sub> = N·c and F<sub>y</sub> = N·s, with c, s the direction from this joint to the member's other end.</p>${fbdTable(d)}`;
+    h += `<details class="explain" ${openIfGuided()}><summary>Why the arrows point the way they do</summary><p>The solver reports a positive N for tension. A stretched member wants to shorten, so it pulls the joints at its ends toward each other: on this joint the pull points along the member, away from the joint. A squeezed member (N negative) wants to lengthen and pushes the joint away. Writing every member force as N times the unit vector from the joint to the other end gives both cases with one formula, because the sign of N flips the arrow.</p></details>`;
+    return h + '</div>';
+  }
+  function bindFbd(box) {
+    box.querySelectorAll('[data-fbd-node]').forEach((b) => b.addEventListener('click', () => selectOnly('node', state.model.nodes[+b.dataset.fbdNode])));
+  }
+  LEARN_VIEWS.fbd = { render: learnFbdView, bind: bindFbd, live: true, onSelect() { renderLearn(); requestRender(); }, leave() { requestRender(); } };
+
+  /* method of joints: state per model (keyed like the predictions) */
+  function jointsState() {
+    let s = state.learn.joints;
+    if (!s || s.key !== predictKey()) {
+      s = state.learn.joints = { key: predictKey(), known: new Set(), answers: {}, feedback: null, revealed: new Set(), log: [] };
+    }
+    const r = state.res;
+    s.complete = !!(r && r.ok && s.known.size === state.model.members.length);
+    return s;
+  }
+  function jointsMeta() {
+    const s = state.learn.joints;
+    if (!s || !state.model.members.length || s.key !== predictKey()) return '';
+    return `${s.known.size} of ${state.model.members.length} found`;
+  }
+  function learnJointsView() {
+    const M = state.model, r = state.res, fu = state.s.forceUnit;
+    let h = learnHead('Method of joints', 'Find the member forces by hand');
+    h += '<div class="act-body">';
+    if (!M.members.length || !r || !r.ok) return h + `<p class="note warn-note">${r && r.mechanism ? 'The structure is unstable, so its member forces are not determined.' : 'Open a stable, loaded truss first: for example the Pratt bridge or the cantilever from File.'}</p></div>`;
+    const s = jointsState(), n = selectedNode(), i = n ? M.nodes.indexOf(n) : -1;
+    h += `<p>Take one joint at a time. At each joint two equations hold, ΣF<sub>x</sub> = 0 and ΣF<sub>y</sub> = 0, so you can find at most <b>two</b> unknown member forces there. Assume every unknown is in <b>tension</b> (N > 0); a negative answer then means compression. The results stay hidden until every member is found.</p>`;
+    // reactions: from the equilibrium of the whole truss; given here
+    const sup = M.nodes.map((x, k) => [x, k, r.nodes[k]]).filter(([, , nr]) => nr && (nr.restrained[0] || nr.restrained[1]));
+    const reactHtml = `<details class="explain"><summary>The support reactions (given)</summary><p>First, the reactions follow from the equilibrium of the whole truss: ΣF<sub>x</sub> = 0, ΣF<sub>y</sub> = 0 and ΣM = 0 about any point. Here they are given, from the solver:</p>
+      <table class="comp-table"><thead><tr><th>Support</th><th>R<sub>x</sub> [${fu}]</th><th>R<sub>y</sub> [${fu}]</th></tr></thead><tbody>${sup.map(([, k, nr]) => `<tr><td>N${k + 1}</td><td>${fnum(nr.rx)}</td><td>${fnum(nr.ry)}</td></tr>`).join('')}</tbody></table></details>`;
+    h += `<div class="score"><span>${s.known.size} of ${M.members.length} member forces found</span></div>`;
+    if (s.complete) {
+      h += '<div class="summary-box">Every member force is found. The results are shown again: compare your forces with the solver in the Inspector or the Members table. They agree because the solver also satisfies ΣF = 0 at every joint.</div>';
+      h += '<div class="btn-row"><button class="btn" data-jact="restart">Start again</button></div>';
+    }
+    const next = EDU.nextJoint(M, r, s.known);
+    if (!s.complete) h += `<p class="note">${next >= 0 ? `A joint you can solve now: <button class="btn sm" data-jnode="${next}">N${next + 1}</button>` : 'No joint has two or fewer unknowns: this truss needs another method (or more equations) at this point.'}</p>`;
+    const chipsHtml = `<details class="more" open><summary>All joints (unknowns shown with ?)</summary><div class="node-chips" role="group" aria-label="Choose a joint">${M.nodes.map((x, k) => {
+      const ex = EDU.jointExercise(M, r, k, s.known);
+      const u = ex ? ex.unknowns.length : 0;
+      return `<button class="btn sm ${k === i ? 'toggle on' : ''}" data-jnode="${k}" title="${u} unknown member force${u === 1 ? '' : 's'}">N${k + 1}${u ? ` <span class="dim">${u}?</span>` : ' ✓'}</button>`;
+    }).join('')}</div></details>`;
+    const tail = chipsHtml + reactHtml + '</div>';
+    if (i < 0 || s.complete) return h + (s.complete ? '' : '<p class="note">Choose a joint below, or select a node on the canvas.</p>') + tail;
+    const ex = EDU.jointExercise(M, r, i, s.known);
+    if (!ex) return h + '<p class="note">This node is not part of the analysis.</p>' + tail;
+    const forces = ex.knowns.map((m) => ({ kind: 'member', member: m.member, N: m.N, state: m.state, ex: m.ex, ey: m.ey, fx: m.fx, fy: m.fy }))
+      .concat(ex.unknowns.map((m) => ({ kind: 'member', member: m.member, unknown: true, ex: m.ex, ey: m.ey, fx: 0, fy: 0, N: 1 })));
+    if (ex.joint.F.fx || ex.joint.F.fy) forces.push({ kind: 'load', fx: ex.joint.F.fx, fy: ex.joint.F.fy });
+    if (ex.joint.R.supported) forces.push({ kind: 'reaction', fx: ex.joint.R.rx, fy: ex.joint.R.ry });
+    h += `<h3>Joint N${i + 1}</h3>` + fbdSvg(forces, { title: `N${i + 1}`, aria: `Joint N${i + 1}: knowns and unknowns` });
+    if (ex.reason === 'done') return h + '<p class="note ok-note">✓ Every member at this joint is already known.</p>' + tail;
+    if (ex.reason === 'too-many') return h + `<p class="note warn-note">${ex.unknowns.length} unknown member forces, but only two equations: solve a neighbouring joint first.</p>` + tail;
+    if (ex.reason === 'collinear') return h + '<p class="note warn-note">The two unknown members lie on one line: ΣF across that line cannot separate them. Solve another joint first.</p>' + tail;
+    // the two equations with the knowns as numbers and the unknowns as symbols (coefficients are the direction cosines)
+    const term = (c, sym) => `${c < 0 ? ' − ' : ' + '}${fmt(Math.abs(c), 4)}·${sym}`;
+    const eqn = (comp) => {
+      const known = (comp === 'x' ? ex.joint.F.fx + (ex.joint.R.supported ? ex.joint.R.rx : 0) + ex.knowns.reduce((t, m) => t + m.fx, 0) : ex.joint.F.fy + (ex.joint.R.supported ? ex.joint.R.ry : 0) + ex.knowns.reduce((t, m) => t + m.fy, 0));
+      return `ΣF<sub>${comp}</sub>:${ex.unknowns.map((u) => term(comp === 'x' ? u.ex : u.ey, `N<sub>M${u.member + 1}</sub>`)).join('').replace(/^ \+ /, ' ')}${known < 0 ? ' − ' : ' + '}${fnum(Math.abs(known))} ${fu} = 0`;
+    };
+    h += `<p class="note">Known forces are numbers (loads, reactions, members already found); unknowns are N times their direction cosines c, s from N${i + 1} toward the member's other end.</p>
+      <div class="equation">${eqn('x')}</div><div class="equation">${eqn('y')}</div>`;
+    const fb = s.feedback && s.feedback.node === i ? s.feedback : null;
+    h += ex.unknowns.map((u) => {
+      const f = fb ? fb.items.find((x) => x.member === u.member) : null;
+      const msg = !f ? '' : f.correct ? '<span class="verdict-ok">✓ right</span>' : f.answer === null ? '<span class="verdict-bad">enter a number</span>'
+        : f.sizeOk && !f.signOk ? '<span class="verdict-bad">✕ right size, wrong sign: check the direction you assumed</span>' : '<span class="verdict-bad">✕ not yet</span>';
+      return `<div class="answer-row"><label for="jans${u.member}">N<sub>M${u.member + 1}</sub></label><input class="num w6" id="jans${u.member}" data-jans="${u.member}" value="${s.answers[u.member] !== undefined ? esc(s.answers[u.member]) : ''}" placeholder="+ tension"><span class="u">${fu}</span> ${msg}</div>`;
+    }).join('');
+    h += `<div class="btn-row"><button class="btn primary sm" data-jact="check">Check</button><button class="btn sm quiet" data-jact="show">Show the solution</button></div>`;
+    if (s.revealed.has(i)) {
+      h += `<div class="summary-box">From the two equations: ${ex.solution.map((x) => `N<sub>M${x.member + 1}</sub> = ${x.N > 0 ? '+' : ''}${fnum(x.N)} ${fu} (${Math.abs(x.N) <= 1e-9 * r.summary.Fref ? 'zero' : x.N > 0 ? 'tension' : 'compression'})`).join(', ')}. ${ex.unknowns.length === 2 ? 'Two equations, two unknowns: solved by elimination (Cramer\'s rule).' : 'One unknown: the equation along the member gives it.'} These are the solver's values too.</div>`;
+    }
+    if (s.log.length) h += `<details class="more"><summary>Found so far</summary><p class="note">${s.log.map((x) => `M${x.member + 1} = ${x.N > 0 ? '+' : ''}${fnum(x.N)} ${fu}`).join(', ')}</p></details>`;
+    return h + tail;
+  }
+  function bindJoints(box) {
+    box.querySelectorAll('[data-jnode]').forEach((b) => b.addEventListener('click', () => selectOnly('node', state.model.nodes[+b.dataset.jnode])));
+    box.querySelectorAll('[data-jans]').forEach((el) => {
+      el.addEventListener('change', () => { jointsState().answers[el.dataset.jans] = el.value; });
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter') { jointsState().answers[el.dataset.jans] = el.value; jointsCheck(); } });
+    });
+    box.querySelectorAll('[data-jact]').forEach((b) => b.addEventListener('click', () => {
+      const s = jointsState();
+      box.querySelectorAll('[data-jans]').forEach((el) => { s.answers[el.dataset.jans] = el.value; });
+      if (b.dataset.jact === 'check') jointsCheck();
+      else if (b.dataset.jact === 'show') { const n = selectedNode(); if (n) s.revealed.add(state.model.nodes.indexOf(n)); renderLearn(); }
+      else if (b.dataset.jact === 'restart') { state.learn.joints = null; refreshAfterPredictChange(); renderLearn(); }
+    }));
+  }
+  function jointsCheck() {
+    const s = jointsState(), n = selectedNode();
+    if (!n) return;
+    const i = state.model.nodes.indexOf(n), ex = EDU.jointExercise(state.model, state.res, i, s.known);
+    if (!ex || !ex.solvable) return;
+    const answers = {};
+    for (const u of ex.unknowns) { const v = evalNum(String(s.answers[u.member] || '').trim() || 'x'); answers[u.member] = Number.isFinite(v) ? v * fU() : null; }
+    const items = EDU.checkJointAnswers(state.res, ex, answers);
+    s.feedback = { node: i, items };
+    if (items.every((x) => x.correct)) {
+      for (const x of items) { s.known.add(x.member); s.log.push({ member: x.member, N: x.N }); }
+      s.feedback = null;
+      const wasComplete = s.complete;
+      jointsState();
+      if (s.complete && !wasComplete) { refreshAfterPredictChange(); toast('Every member force found by the method of joints', 'ok'); }
+      else toast(`Joint N${i + 1} solved`, 'ok');
+      const next = EDU.nextJoint(state.model, state.res, s.known);
+      if (next >= 0 && !s.complete) { selectOnly('node', state.model.nodes[next]); return; }
+    }
+    renderLearn(); requestRender();
+  }
+  LEARN_VIEWS.joints = {
+    render: learnJointsView, bind: bindJoints, live: true,
+    enter() {
+      const s = jointsState();
+      const sel = selectedNode(), at = sel ? EDU.jointExercise(state.model, state.res, state.model.nodes.indexOf(sel), s.known) : null;
+      if ((!at || !at.solvable) && state.res && state.res.ok) { // start at a joint that can be solved
+        const nx = EDU.nextJoint(state.model, state.res, s.known);
+        if (nx >= 0) { state.sel.members.clear(); state.sel.nodes = new Set([state.model.nodes[nx]]); }
+      }
+      refreshAfterPredictChange();
+    },
+    leave() { setTimeout(refreshAfterPredictChange, 0); },
+    onSelect() { renderLearn(); requestRender(); },
+  };
+  /** The isolated joint on the canvas: a dashed circle where the members are cut, and the members known so far. */
+  function drawFbdOverlay(P) {
+    if (state.s.workspace !== 'learn' || (state.learn.view !== 'fbd' && state.learn.view !== 'joints')) return;
+    const n = selectedNode();
+    ctx.save();
+    if (state.learn.view === 'joints' && state.learn.joints && state.res && state.res.ok) {
+      ctx.font = `12px ${MONO}`;
+      for (const k of state.learn.joints.known) {
+        const e = state.model.members[k], mr = state.res.members[k];
+        if (!e || !mr) continue;
+        const a = P.get(e.n1), b = P.get(e.n2);
+        tag(`${mr.state === 'zero' ? '0' : `${mr.force > 0 ? '+' : ''}${fF(mr.force, state.res.summary.Fref)}`}`, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 'center', 'middle', mr.state === 'zero' ? COL.zeroHex : mr.force > 0 ? COL.tensionHex : COL.compressionHex);
+      }
+    }
+    if (n && P.has(n)) {
+      const [x, y] = P.get(n);
+      ctx.setLineDash([5, 4]); ctx.strokeStyle = COL.accent2; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(x, y, 26, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+
+  /* ---------- Solver Explorer (milestone 9) ---------- */
+  ICON.explorer = '<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="14" height="14" rx="1.5"/><path d="M3 8 H17 M8 3 V17"/></svg>';
+  LEARN_ACTIVITIES.push({ item: () => ['explorer', ICON.explorer, 'Solver Explorer', 'Follow your model through the Direct Stiffness Method: DOFs, element matrices, assembly, the reduced system, and back to forces.', ''] });
+  function explorerState() {
+    if (!state.learn.explorer) state.learn.explorer = { stage: 0, member: 0, cell: null };
+    return state.learn.explorer;
+  }
+  const kUnit = () => STIFF_UNITS[state.s.mtxUnit] || 1e3;
+  /**
+   * A matrix as a table: rows and columns labelled with DOF names, values in the chosen stiffness unit.
+   * cls(a, b) adds classes (partition, contribution, selection); clickable cells carry data-r and data-c.
+   */
+  function mtxTable(M, nr, nc, rowLab, colLab, opts) {
+    const o = opts || {}, unit = o.unit || 1;
+    let mx = 0;
+    for (let a = 0; a < nr * nc; a++) mx = Math.max(mx, Math.abs(M[a]));
+    let h = `<div class="mtx-scroll"><table class="mtx"><thead><tr><th class="corner rh"></th>${colLab.map((l, b) => `<th class="${o.colCls ? o.colCls(b) : ''}">${esc(l)}</th>`).join('')}</tr></thead><tbody>`;
+    for (let a = 0; a < nr; a++) {
+      h += `<tr><th class="rh ${o.rowCls ? o.rowCls(a) : ''}">${esc(rowLab[a])}</th>`;
+      for (let b = 0; b < nc; b++) {
+        const v = chop(M[a * nc + b], mx);
+        const cls = [nr === nc && a === b ? 'diag' : '', v === 0 ? 'zero' : '', v < 0 ? 'neg' : '', o.cls ? o.cls(a, b) : ''].join(' ');
+        h += `<td class="${cls}" ${o.click ? `data-r="${a}" data-c="${b}" tabindex="0"` : ''}>${v === 0 ? '·' : fmt(v / unit)}</td>`;
+      }
+      h += '</tr>';
+    }
+    return h + '</tbody></table></div>';
+  }
+  const vecTable = (vals, labels, unitFn, head) => `<table class="comp-table"><thead><tr><th>DOF</th><th>${head}</th></tr></thead><tbody>${vals.map((v, a) => `<tr><td>${esc(labels[a])}</td><td>${unitFn(v)}</td></tr>`).join('')}</tbody></table>`;
+  function explorerStageHtml(ex, st, r) {
+    const M = state.model, S = explorerState(), fu = state.s.forceUnit, du = state.s.dispUnit, ku = state.s.mtxUnit;
+    const memberChips = () => `<div class="node-chips" role="group" aria-label="Choose a member">${M.members.map((e, k) => `<button class="btn sm ${k === S.member ? 'toggle on' : ''}" data-xmember="${k}">M${k + 1}</button>`).join('')}</div>`;
+    const mr = r.members[S.member] || r.members[0];
+    const big = ex.tooLarge ? `<p class="note warn-note">This model has ${ex.ndof} DOFs, so its matrices have ${ex.ndof * ex.ndof} entries. The Explorer shows matrices as tables up to ${EDU.EXPLORER_MAX_DOFS} × ${EDU.EXPLORER_MAX_DOFS}: try the A-frame (6 DOFs) or the inclined-roller truss (6 DOFs), or see the heatmap in the Matrices tab.</p>` : '';
+    switch (st.id) {
+      case 'model': {
+        const loads = M.nodes.map((n, i) => [i, nodeLoad(M, n)]).filter(([, L]) => L.fx || L.fy);
+        return `<p>${plural(M.nodes.length, 'node')}, ${plural(M.members.length, 'member')}, ${plural(M.nodes.filter((n) => n.support.type !== 'none').length, 'support')}, ${plural(loads.length, 'loaded node')}. The solver receives coordinates, member properties (E, A, I, σ<sub>y</sub>), restraints and the actions of what is analysed, multiplied by λ.</p>
+          <table class="comp-table"><thead><tr><th>Member</th><th>E [GPa]</th><th>A [mm²]</th><th>L [m]</th></tr></thead><tbody>${r.members.map((x, k) => `<tr><td>M${k + 1}</td><td>${fmt(x.E / GPA)}</td><td>${fmt(x.A / MM2)}</td><td>${fmt(x.L)}</td></tr>`).join('')}</tbody></table>`;
+      }
+      case 'numbering':
+        return `<p>The numbers are the order of the nodes and members in the model. A member's direction (start i → end j) only fixes the sign of c and s; the results do not depend on it.</p>
+          <table class="comp-table"><thead><tr><th>Member</th><th>start i</th><th>end j</th></tr></thead><tbody>${r.members.map((x, k) => `<tr><td>M${k + 1}</td><td>N${x.i + 1}</td><td>N${x.j + 1}</td></tr>`).join('')}</tbody></table>`;
+      case 'dofs':
+        return `<p>${ex.ndof} DOFs in all (2 × ${M.nodes.length} nodes). Node i has DOF ${'2i − 1'} along x and DOF 2i along y; they are labelled "ix" and "iy" (with ′ in a rotated support frame). The canvas shows them as arrows: <span class="known">teal: free</span>, <span class="unknown">amber: restrained</span>.</p>
+          <table class="comp-table"><thead><tr><th>Node</th><th>x DOF</th><th>y DOF</th><th>state</th></tr></thead><tbody>${M.nodes.map((n, i) => `<tr><td>N${i + 1}</td><td>${esc(ex.labels[2 * i])}</td><td>${esc(ex.labels[2 * i + 1])}</td><td>${r.nodes[i] && !r.nodes[i].active ? 'not connected' : [0, 1].map((a) => (ex.fixed.includes(2 * i + a) ? 'fixed' : 'free')).join(', ')}</td></tr>`).join('')}</tbody></table>`;
+      case 'element':
+        return `${memberChips()}<p>M${S.member + 1} acts as an axial spring: pull its ends apart by δ and it resists with N = k·δ.</p>
+          <div class="equation">k = E·A/L = ${sci(mr.E)} Pa × ${sci(mr.A)} m² / ${sci(mr.L)} m = ${sci(mr.k)} N/m</div>
+          <p>In the member's own axis (one DOF at each end, along the member), the two end forces and the two end displacements are related by the 2 × 2 matrix</p>
+          ${mtxTable([mr.k, -mr.k, -mr.k, mr.k], 2, 2, ['i', 'j'], ['i', 'j'], { unit: kUnit() })}<p class="note">Values in ${ku}. Pushing one end while holding the other: the forces are equal and opposite, so each row sums to zero.</p>`;
+      case 'transformation': {
+        const t = EDU.memberTransformation(r, S.member), lab = mr.dofs.map((d) => ex.labels[d]);
+        return `${memberChips()}<p>c = cos θ = ${fmt(mr.c, 6)} and s = sin θ = ${fmt(mr.s, 6)}. The axial displacement of an end is c·u<sub>x</sub> + s·u<sub>y</sub>, which is T times the global displacements:</p>
+          ${mtxTable(t.T.flat(), 2, 4, ['i', 'j'], lab, {})}
+          <p>so the member's stiffness in global axes is kᵉ = Tᵀ·k·T = (E·A/L)·[c² cs −c² −cs; cs s² −cs −s²; …]:</p>
+          ${mtxTable(t.ke.flat(), 4, 4, lab, lab, { unit: kUnit() })}<p class="note">Values in ${ku}. This is exactly the solver's kᵉ for M${S.member + 1}.</p>`;
+      }
+      case 'assembly': {
+        if (ex.tooLarge) return big;
+        const contrib = new Set(EDU.assemblyContribution(r, S.member).map((c) => c.row * ex.ndof + c.col));
+        let cell = '';
+        if (S.cell) {
+          const parts = EDU.entryContributions(r, S.cell.r, S.cell.c);
+          cell = `<div class="equation">K[${esc(ex.labels[S.cell.r])}, ${esc(ex.labels[S.cell.c])}] = ${parts.length ? parts.map((p) => `${fmt(p.value / kUnit())} (M${p.member + 1})`).join(' + ') : '0 (no member joins these DOFs)'} = ${fmt(r.K[S.cell.r * ex.ndof + S.cell.c] / kUnit())} ${ku}</div>`;
+        }
+        return `${memberChips()}<p>Each member adds its kᵉ into the rows and columns of its four DOFs; where members share a node their terms add up. Highlighted: the 16 entries M${S.member + 1} adds. Select any entry to see the sum behind it.</p>${cell}
+          ${mtxTable(r.K, ex.ndof, ex.ndof, ex.labels, ex.labels, { unit: kUnit(), click: true, cls: (a, b) => `${contrib.has(a * ex.ndof + b) ? 'contrib' : ''} ${S.cell && S.cell.r === a && S.cell.c === b ? 'hl' : ''}` })}
+          <p class="note">Global K in ${ku}, ${ex.ndof} × ${ex.ndof}, exactly symmetric. On its own K is singular: nothing yet stops the truss from moving as a rigid body.</p>`;
+      }
+      case 'boundary':
+        return `<p>${ex.ns} of the ${ex.ndof} DOFs are restrained by supports, ${ex.nf} are free.${ex.rotated.length ? ` Nodes ${ex.rotated.map((i) => `N${i + 1}`).join(', ')} have a rotated support frame: their DOFs are turned to the support's x′, y′ axes (K′ = Λ·K·Λᵀ), so a roller on a slope restrains exactly the direction normal to it.` : ''}</p>
+          <table class="comp-table"><thead><tr><th>Restrained DOF</th><th>prescribed u [${du}]</th></tr></thead><tbody>${ex.fixed.map((d) => `<tr><td>${esc(ex.labels[d])}</td><td>${fD(r.prescribed[d])}</td></tr>`).join('')}</tbody></table>
+          <p class="note">A prescribed value other than 0 is a support settlement (λ included).</p>`;
+      case 'partition': {
+        if (ex.tooLarge) return big;
+        const isF = new Set(ex.free);
+        return `<p>With the free DOFs (f) first and the restrained ones (s) second, K′·u = F splits into blocks: K<sub>ff</sub>·u<sub>f</sub> + K<sub>fs</sub>·u<sub>s</sub> = F<sub>f</sub>, and the rows of the restrained DOFs give the reactions. Amber marks the restrained rows and columns.</p>
+          ${mtxTable(r.Kt, ex.ndof, ex.ndof, ex.labels, ex.labels, { unit: kUnit(), rowCls: (a) => (isF.has(a) ? '' : 'fix'), colCls: (b) => (isF.has(b) ? '' : 'fix'), cls: (a, b) => (isF.has(a) && isF.has(b) ? '' : 'fixcell') })}`;
+      }
+      case 'reduced': {
+        const D = ex.diagnostics || {}, lab = ex.free.map((d) => ex.labels[d]);
+        let h = ex.nf > EDU.EXPLORER_MAX_DOFS ? big : mtxTable(r.Kff, ex.nf, ex.nf, lab, lab, { unit: kUnit() });
+        h += `<p class="note">K<sub>ff</sub> in ${ku}, ${ex.nf} × ${ex.nf}.</p>`;
+        if (ex.mechanism) h += `<p class="note bad-note">Rank ${D.rank} of ${ex.nf}: K<sub>ff</sub> is singular, so K<sub>ff</sub>·u<sub>f</sub> = b<sub>f</sub> has no unique solution. ${plural(ex.mechanism.nullity, 'mechanism mode')}: ${esc(ex.mechanism.modes[0] ? ex.mechanism.modes[0].description : '')} The later stages need a stable structure.</p>`;
+        else if (ex.nf) h += `<details class="explain" ${openIfGuided()}><summary>Is the system well posed?</summary><p>Before solving, the solver checks that K<sub>ff</sub> is positive definite (rank ${D.rank} of ${ex.nf}, by a pivoted Cholesky factorisation of the scaled matrix). Its 1-norm condition number κ₁ = ${fmt(D.cond1Scaled, 3)} (scaled) says how much the data's rounding can be amplified: about ${Math.floor(D.digits || 0)} of the 16 significant digits are reliable before refinement. det K<sub>ff</sub> = ${fmt(D.detRaw ? D.detRaw.mantissa : NaN, 4)} × 10${String(D.detRaw ? D.detRaw.exponent : 0).split('').map((c) => SUP[c] || c).join('')} (N/m)${String(ex.nf).split('').map((c) => SUP[c] || c).join('')}.</p></details>`;
+        return h;
+      }
+      case 'loads': {
+        const lab = ex.free.map((d) => ex.labels[d]);
+        const Ff = ex.free.map((d) => (r.Ft || r.F)[d]);
+        return `<p>F holds the nodal loads (λ included), in the support frames where a frame is rotated. At the free DOFs the right-hand side is b<sub>f</sub> = F<sub>f</sub> − K<sub>fs</sub>·u<sub>s</sub>; the second term is the effect of prescribed settlements (zero when none).</p>
+          <div class="calc"><div class="step-label">F<sub>f</sub> and b<sub>f</sub></div></div>
+          <table class="comp-table"><thead><tr><th>DOF</th><th>F<sub>f</sub> [${fu}]</th><th>b<sub>f</sub> [${fu}]</th></tr></thead><tbody>${lab.map((l, a) => `<tr><td>${esc(l)}</td><td>${fF(Ff[a])}</td><td>${fF(r.bf[a])}</td></tr>`).join('')}</tbody></table>`;
+      }
+      case 'displacements': {
+        const lab = ex.free.map((d) => ex.labels[d]), D = ex.diagnostics || {};
+        return `<p>The solver factorises K<sub>ff</sub> (LU with partial pivoting) and solves for u<sub>f</sub>, then refines the solution ${plural(D.refineIterations || 0, 'time')} with residuals computed in about twice double precision.</p>
+          ${vecTable(ex.free.map((d) => r.ut[d]), lab, (v) => `${fD(v)}`, `u<sub>f</sub> [${du}]`)}
+          <p class="note ok-note">Check: max |K<sub>ff</sub>·u<sub>f</sub> − b<sub>f</sub>| = ${fmt(ex.residual ? ex.residual.max : 0, 2)} N, ${fmt(ex.residual ? ex.residual.rel : 0, 2)} of the largest load term: the equations are satisfied to round-off.</p>`;
+      }
+      case 'forces':
+        return `<p>For each member, the displacements of its two ends give its change of length δ = c·(u<sub>xj</sub> − u<sub>xi</sub>) + s·(u<sub>yj</sub> − u<sub>yi</sub>) and its force N = (E·A/L)·δ. Select a member to see the full calculation in the Inspector.</p>
+          <table class="comp-table"><thead><tr><th>Member</th><th>δ [${du}]</th><th>N [${fu}]</th></tr></thead><tbody>${r.members.map((x, k) => `<tr><td>M${k + 1}</td><td>${fD(x.elong)}</td><td class="${x.state === 'tension' ? 't-sign' : x.state === 'compression' ? 'c-sign' : ''}">${x.state === 'zero' ? '0' : fF(x.force, r.summary.Fref)}</td></tr>`).join('')}</tbody></table>`;
+      case 'reactions':
+        return `<p>At a restrained DOF the row of K·u = F + R gives the reaction: R = K·u − F. It is the force the support applies to keep that DOF where it is.</p>
+          <table class="comp-table"><thead><tr><th>DOF</th><th>R [${fu}]</th></tr></thead><tbody>${ex.fixed.map((d) => `<tr><td>${esc(ex.labels[d])}</td><td>${fF(r.Rt ? r.Rt[d] : r.R[d], r.summary.Fref)}</td></tr>`).join('')}</tbody></table>`;
+      case 'equilibrium': {
+        const e = (ex.diagnostics || {}).equilibrium || {};
+        return `<p>Every load and reaction together must balance, as for any body at rest:</p>
+          <div class="equation">ΣF<sub>x</sub> = ${fmt(e.sumFx, 3)} N,  ΣF<sub>y</sub> = ${fmt(e.sumFy, 3)} N,  ΣM = ${fmt(e.sumM, 3)} N·m</div>
+          <p class="note ok-note">Relative to the forces involved: ${fmt(Math.max(e.relF || 0, e.relM || 0), 2)}. The equilibrium of every joint, rebuilt from the member forces, leaves ${fmt((ex.diagnostics || {}).nodalResidualRel, 2)}. Both are round-off: the solution is exact to the precision of the arithmetic.</p>`;
+      }
+      default: return '';
+    }
+  }
+  function learnExplorerView() {
+    const r = state.res, M = state.model;
+    let h = learnHead('Solver Explorer', 'The Direct Stiffness Method, with your model');
+    h += '<div class="act-body">';
+    const small = `<div class="btn-row"><button class="btn sm" data-xexample="aframe">A-frame (6 DOFs)</button><button class="btn sm" data-xexample="inclined">Inclined roller (6 DOFs)</button><button class="btn sm" data-xexample="warren">Warren truss (22 DOFs)</button></div>`;
+    if (!M.members.length || !r || !r.K) return h + `<p class="note warn-note">${!M.members.length ? 'The model has no members yet.' : 'The model cannot be analysed yet (see Results).'} Start with a small worked example:</p>${small}</div>`;
+    const ex = EDU.explorer(M, r), S = explorerState();
+    S.stage = clamp(S.stage, 0, ex.stages.length - 1);
+    if (S.member >= M.members.length) S.member = 0;
+    const st = ex.stages[S.stage];
+    h += `<div class="stage-list" role="group" aria-label="Stages">${ex.stages.map((s, i) => `<button data-xstage="${i}" ${i === S.stage ? 'aria-current="step"' : ''} ${s.available ? '' : 'disabled'} title="${esc(s.title)}">${i + 1}</button>`).join('')}</div>`;
+    h += `<h3>${S.stage + 1}. ${mathHtml(st.title)}</h3><p><b>${mathHtml(st.what)}</b></p>`;
+    h += st.available ? explorerStageHtml(ex, st, r) : '<p class="note bad-note">This stage needs a stable structure: the reduced stiffness matrix of this model is singular, so there is no solution to follow.</p>';
+    if (S.stage === 0) h += `<details class="explain" ${openIfGuided()}><summary>Worked examples</summary><p>A small model keeps every matrix readable:</p>${small}</details>`;
+    h += '</div>';
+    h += `<div class="step-nav"><button class="btn sm" data-xnav="-1" ${S.stage === 0 ? 'disabled' : ''}>&#8592; Previous</button><span class="dim">Stage ${S.stage + 1} of ${ex.stages.length}</span><button class="btn sm primary" data-xnav="1" ${S.stage === ex.stages.length - 1 || !ex.stages[S.stage + 1].available ? 'disabled' : ''}>Next &#8594;</button></div>`;
+    return h;
+  }
+  function bindExplorer(box) {
+    const S = explorerState();
+    box.querySelectorAll('[data-xstage]').forEach((b) => b.addEventListener('click', () => { S.stage = +b.dataset.xstage; S.cell = null; renderLearn(); requestRender(); }));
+    box.querySelectorAll('[data-xnav]').forEach((b) => b.addEventListener('click', () => { S.stage += +b.dataset.xnav; S.cell = null; renderLearn(); requestRender(); box.scrollTop = 0; }));
+    box.querySelectorAll('[data-xmember]').forEach((b) => b.addEventListener('click', () => { S.member = +b.dataset.xmember; S.cell = null; selectOnly('member', state.model.members[S.member]); }));
+    box.querySelectorAll('[data-xexample]').forEach((b) => b.addEventListener('click', () => {
+      pushUndo();
+      loadModel(buildExample(b.dataset.xexample), `Solver Explorer: ${EXAMPLES.find((x) => x[0] === b.dataset.xexample)[1]}`);
+      S.stage = 0; S.member = 0; S.cell = null; renderLearn();
+    }));
+    const pickCell = (td) => { S.cell = { r: +td.dataset.r, c: +td.dataset.c }; renderLearn(); const again = $(`#paneLearn td[data-r="${S.cell.r}"][data-c="${S.cell.c}"]`); if (again) again.focus(); };
+    box.querySelectorAll('td[data-r]').forEach((td) => {
+      td.addEventListener('click', () => pickCell(td));
+      td.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickCell(td); } });
+    });
+  }
+  LEARN_VIEWS.explorer = {
+    render: learnExplorerView, bind: bindExplorer, live: true,
+    onSelect() { const S = explorerState(); if (state.sel.members.size === 1) { S.member = state.model.members.indexOf([...state.sel.members][0]); renderLearn(); } requestRender(); },
+    leave() { requestRender(); },
+  };
+  /** The Explorer on the canvas: DOF arrows (free teal, restrained amber) and the member being looked at. */
+  function drawExplorerOverlay(P) {
+    if (state.s.workspace !== 'learn' || state.learn.view !== 'explorer') return;
+    const r = state.res, S = explorerState(), id = EDU.EXPLORER_STAGES[S.stage] ? EDU.EXPLORER_STAGES[S.stage].id : '';
+    if (!r || !r.K) return;
+    ctx.save();
+    if (['element', 'transformation', 'assembly'].includes(id)) {
+      const e = state.model.members[S.member];
+      if (e && P.has(e.n1)) { const a = P.get(e.n1), b = P.get(e.n2); ctx.strokeStyle = COL.accent; ctx.lineWidth = 6; ctx.globalAlpha = 0.55; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); ctx.globalAlpha = 1; }
+    }
+    if (['dofs', 'boundary', 'partition', 'reduced', 'loads', 'displacements'].includes(id)) {
+      const fixed = new Set(Array.from(r.fixed || []));
+      ctx.font = `12px ${MONO}`; ctx.lineWidth = 1.6;
+      state.model.nodes.forEach((n, i) => {
+        if (!P.has(n) || !r.nodes[i] || !r.nodes[i].active) return;
+        const [x, y] = P.get(n), fr = r.nodes[i].frame || [1, 0];
+        [[fr[0], -fr[1], 2 * i], [-fr[1], -fr[0], 2 * i + 1]].forEach(([ux, uy, d]) => {
+          const col = fixed.has(d) ? COL.warn : COL.accent2;
+          ctx.strokeStyle = col; ctx.fillStyle = col;
+          arrow(x + ux * 6, y + uy * 6, x + ux * 30, y + uy * 30, 6);
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(r.dofLabels[d], x + ux * 42, y + uy * 42);
+        });
+      });
+    }
+    ctx.restore();
+  }
+
+
+  /* ---------- lessons (milestone 11) ---------- */
+  const TLS = window.TrussLessons || null;
+  ICON.lesson = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4.5 C6 3.5 8 3.5 10 5 C12 3.5 14 3.5 17 4.5 V16 C14 15 12 15 10 16.5 C8 15 6 15 3 16 Z M10 5 V16.5"/></svg>';
+  const PROGRESS_KEY = TLS ? (SMOKE ? TLS.PROGRESS_KEYS.smoke : TLS.PROGRESS_KEYS.user) : null;
+  const progressStatus = { readFailed: false, unreadable: null, lastSave: null };
+  /** Lesson progress, read once at start-up (kept apart from the model and the session). */
+  function loadLearnProgress() {
+    if (!TLS) return null;
+    if (SMOKE && STORE) { try { STORE.removeItem(PROGRESS_KEY); STORE.removeItem(`${PROGRESS_KEY}.unreadable`); } catch (e) { /* storage unavailable */ } }
+    const r = TLS.loadProgress(STORE, PROGRESS_KEY);
+    progressStatus.readFailed = !r.ok && !!STORE;
+    progressStatus.unreadable = r.unreadable === undefined ? null : r.unreadable;
+    return r.progress;
+  }
+  function saveLearnProgress() {
+    if (!TLS || !state.learnProgress) return;
+    progressStatus.lastSave = TLS.saveProgress(STORE, PROGRESS_KEY, state.learnProgress, progressStatus);
+  }
+  const progressNote = () => (progressStatus.readFailed ? '<p class="note warn-note">Your lesson progress could not be read from browser storage, so it is not saved in this session. Reload the page to try again.</p>'
+    : progressStatus.lastSave && !progressStatus.lastSave.saved ? '<p class="note warn-note">Lesson progress not saved: browser storage is unavailable.</p>' : '');
+  /** Which example the model on screen is (unchanged), or ''. Used to show worked examples and to record exercises. */
+  let exampleSerials = null;
+  function exampleKeyOf(model) {
+    if (!exampleSerials) exampleSerials = new Map(EXAMPLES.map(([k]) => [JSON.stringify(serialize(buildExample(k))), k]));
+    return exampleSerials.get(JSON.stringify(serialize(model))) || '';
+  }
+  function recordExercise(id) {
+    if (!state.learnProgress || state.learnProgress.exercises[id]) return;
+    state.learnProgress.exercises[id] = true;
+    saveLearnProgress();
+  }
+  /** Lessons on the Learn home: progress, and a "continue" entry. */
+  function lessonsHomeHtml() {
+    if (!TLS) return '';
+    const p = state.learnProgress || TLS.emptyProgress();
+    const cur = p.current ? TLS.lesson(p.current) : null;
+    let h = `<div class="sub-h" style="margin:var(--sp-5) var(--sp-4) var(--sp-2)">Lessons <small>${p.completed.length} of ${TLS.LESSONS.length} complete</small></div><ul class="activity-list">`;
+    if (cur && !p.completed.includes(cur.id)) h += `<li><button data-lesson="${cur.id}"><span class="a-icon">${ICON.cont}</span><span><span class="a-title">Continue: lesson ${cur.number}</span><span class="a-desc">${esc(cur.title)}</span></span><span class="a-meta">Open</span></button></li>`;
+    h += TLS.LESSONS.map((l) => {
+      const done = p.completed.includes(l.id);
+      return `<li class="${done ? 'done' : ''}"><button data-lesson="${l.id}"><span class="a-icon">${ICON.lesson}</span><span><span class="a-title">${l.number}. ${esc(l.title)}</span><span class="a-desc">${esc(l.objectives[0])}</span></span><span class="a-meta">${done ? '✓ done' : ''}</span></button></li>`;
+    }).join('');
+    return h + '</ul>' + progressNote();
+  }
+  function lessonView() {
+    const l = TLS && TLS.lesson(state.learn.lesson);
+    if (!l) return learnHead('Lesson') + '<p class="panel-intro">This lesson is not available.</p>';
+    const p = state.learnProgress || TLS.emptyProgress(), r = R(), onModel = exampleKeyOf(state.model) === l.model;
+    const exLabel = (EXAMPLES.find((x) => x[0] === l.model) || ['', l.model])[1];
+    const done = p.completed.includes(l.id);
+    let h = learnHead(`Lesson ${l.number}: ${esc(l.title)}`, `${done ? '✓ Complete. ' : ''}Lesson ${l.number} of ${TLS.LESSONS.length}`) + '<div class="act-body">';
+    h += `<div class="progress-dots" aria-label="Lessons">${TLS.LESSONS.map((x) => `<i class="${p.completed.includes(x.id) ? 'on' : ''}" title="Lesson ${x.number}${p.completed.includes(x.id) ? ': complete' : ''}"></i>`).join('')}</div>`;
+    h += `<h3>You will learn to</h3><ul class="objectives">${l.objectives.map((o) => `<li>${mathHtml(o)}</li>`).join('')}</ul>`;
+    h += `<p class="lesson-meta">Before this: ${l.prerequisites.map(esc).join(' ')}</p>`;
+    h += `<p><b>${mathHtml(l.intro)}</b></p>`;
+    h += `<h3>Explanation</h3>${l.explanation.map((t) => `<p>${mathHtml(t)}</p>`).join('')}`;
+    h += `<h3>Equations</h3>${l.equations.map((e) => `<div class="equation">${mathHtml(e.eq)}</div><p class="note">${mathHtml(e.meaning)}</p>`).join('')}
+      <table class="vars">${l.variables.map(([s, m, u]) => `<tr><td>${mathHtml(s)}</td><td>${mathHtml(m)}</td><td>${esc(u)}</td></tr>`).join('')}</table>`;
+    h += '<h3>Worked example</h3>';
+    if (!onModel) h += `<p>The worked example uses the example “${esc(exLabel)}”, so every number is the solver's own.</p><div class="btn-row"><button class="btn sm primary" data-lact="model">Open “${esc(exLabel)}”</button></div><p class="note">Your current model stays in the undo history (Ctrl+Z).</p>`;
+    else {
+      const w = l.worked(state.model, r);
+      h += !w ? '<p class="note">No results to work with yet.</p>' : `<div class="calc"><ol>${w.map((it) => `<li><div class="step-math">${mathHtml(it.text)}${it.q ? `: <span class="v">${esc(it.q.kind === 'count' ? String(it.q.value) : qShow(it.q))}</span>` : ''}</div></li>`).join('')}</ol></div>`;
+    }
+    const act = l.interactive.activity;
+    h += `<h3>Try it</h3><p>${mathHtml(l.interactive.text)}</p><div class="btn-row"><button class="btn sm" data-lact="activity">${act === 'inspector' ? 'Select M1 in Analyze' : act === 'build' ? 'Open the guided activity' : act === 'predict' ? 'Open the prediction activity' : act === 'fbd' ? 'Open the free-body diagram' : act === 'joints' ? 'Open the method of joints' : 'Open the Solver Explorer'}</button></div>`;
+    h += `<h3>Practice</h3><p>${mathHtml(l.practice)}</p>`;
+    h += '<h3>Check your understanding</h3>';
+    l.check.forEach((item, k) => {
+      const ans = state.learn.answers && state.learn.answers[`${l.id}:${k}`];
+      h += `<div class="quiz"><div class="q">${k + 1}. ${mathHtml(item.q)}</div><div class="opts" role="group">${item.options.map((o, j) => `<button data-quiz="${k}" data-opt="${j}" class="${ans !== undefined && j === ans ? (j === item.answer ? 'right' : 'wrong') : ans !== undefined && j === item.answer && ans === item.answer ? 'right' : ''}" aria-pressed="${ans === j}">${mathHtml(o)}</button>`).join('')}</div>
+        ${ans !== undefined ? `<p class="why">${ans === item.answer ? '<span class="verdict-ok">✓ Right.</span>' : '<span class="verdict-bad">✕ Not quite.</span>'} ${mathHtml(item.why)}</p>` : ''}</div>`;
+    });
+    h += `<h3>Summary</h3><div class="summary-box">${mathHtml(l.summary)}</div>`;
+    h += `<h3>Common misconceptions</h3>${l.misconceptions.map(([wrong, right]) => `<div class="misconception"><b>Not quite:</b> ${mathHtml(wrong)}<br>${mathHtml(right)}</div>`).join('')}`;
+    if (l.challenge) {
+      const ev = state.learn.challengeResult && state.learn.challengeResult.id === l.challenge.id ? state.learn.challengeResult : null;
+      h += `<h3>Challenge</h3><p>${mathHtml(l.challenge.text)}</p><div class="btn-row"><button class="btn sm primary" data-lact="challenge">Check my model</button>${p.challenges[l.challenge.id] ? '<span class="verdict-ok">✓ done before</span>' : ''}</div>`;
+      if (ev) h += `<ul class="msg-list">${ev.criteria.map((c) => `<li class="${c.pass ? '' : 'e'}" style="list-style:none">${c.pass ? '✓' : '✕'} ${mathHtml(c.label)}</li>`).join('')}</ul>${ev.passed ? '<div class="summary-box">Challenge met: every criterion holds on your model.</div>' : ''}`;
+      h += '<p class="note">Challenges are checked on objective criteria from your model and the solver. Written reasoning is not graded.</p>';
+    }
+    const next = TLS.LESSONS.find((x) => x.number === l.number + 1);
+    h += `</div><div class="step-nav"><button class="btn sm ${done ? '' : 'primary'}" data-lact="complete" ${done ? 'disabled' : ''}>${done ? '✓ Complete' : 'Mark as complete'}</button>${next ? `<button class="btn sm" data-lesson="${next.id}">Lesson ${next.number} &#8594;</button>` : ''}</div>`;
+    return h + progressNote();
+  }
+  function bindLesson(box) {
+    const l = TLS && TLS.lesson(state.learn.lesson);
+    if (!l) return;
+    box.querySelectorAll('[data-quiz]').forEach((b) => b.addEventListener('click', () => {
+      const k = +b.dataset.quiz, j = +b.dataset.opt;
+      state.learn.answers = state.learn.answers || {};
+      state.learn.answers[`${l.id}:${k}`] = j;
+      if (TLS.checkAnswer(l, k, j).correct) recordExercise(`quiz:${l.id}:${k}`);
+      renderLearn();
+    }));
+    box.querySelectorAll('[data-lact]').forEach((b) => b.addEventListener('click', () => {
+      const a = b.dataset.lact;
+      if (a === 'model') { pushUndo(); loadModel(buildExample(l.model), `Lesson ${l.number}: ${EXAMPLES.find((x) => x[0] === l.model)[1]}`); renderLearn(); }
+      else if (a === 'activity') {
+        const act = l.interactive.activity;
+        if (act === 'inspector') { setWorkspace('analyze'); if (state.model.members[0]) selectOnly('member', state.model.members[0]); }
+        else openLearnView(act);
+      } else if (a === 'challenge') {
+        const ev = TLS.evaluateChallenge(l, state.model, R(), state.learnProgress);
+        state.learn.challengeResult = ev;
+        if (ev && ev.passed && state.learnProgress && !state.learnProgress.challenges[ev.id]) { state.learnProgress.challenges[ev.id] = true; saveLearnProgress(); }
+        renderLearn();
+      } else if (a === 'complete') {
+        const p = state.learnProgress;
+        if (!p) return;
+        if (!p.completed.includes(l.id)) p.completed.push(l.id);
+        const next = TLS.LESSONS.find((x) => x.number === l.number + 1);
+        p.current = next ? next.id : l.id;
+        saveLearnProgress();
+        toast(`Lesson ${l.number} complete`, 'ok');
+        renderLearn();
+      }
+    }));
+  }
+  function openLesson(id) {
+    state.learn.lesson = id;
+    state.learn.challengeResult = null;
+    if (state.learnProgress && state.learnProgress.current !== id) { state.learnProgress.current = id; saveLearnProgress(); }
+    openLearnView('lesson');
+  }
+  LEARN_VIEWS.lesson = { render: lessonView, bind: bindLesson, live: true };
+
+  function renderLearn() {
+    const box = $('#paneLearn');
+    if (!box) return;
+    const v = LEARN_VIEWS[state.learn.view] ? state.learn.view : 'home';
+    if (v !== state.learn.view) state.learn.view = v;
+    box.innerHTML = v === 'home' ? learnHome() : LEARN_VIEWS[v].render();
+    bindLearn(box);
+    if (LEARN_VIEWS[v] && LEARN_VIEWS[v].bind) LEARN_VIEWS[v].bind(box);
+  }
+  /** After an edit or a solve: refresh the Learn panel if it follows the model, unless the learner is typing in it. */
+  function refreshLearnLive() {
+    if (state.s.workspace !== 'learn') return;
+    const box = $('#paneLearn'), a = document.activeElement;
+    if (box && a && box.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA')) return;
+    const v = state.learn.view;
+    if (v === 'home' || (LEARN_VIEWS[v] && LEARN_VIEWS[v].live)) renderLearn();
+  }
+  function openLearnView(v) {
+    if (v === 'analyze') { setWorkspace('analyze'); return; }
+    const leaving = LEARN_VIEWS[state.learn.view];
+    if (leaving && leaving.leave && state.learn.view !== v) leaving.leave();
+    state.learn.view = v;
+    const entering = LEARN_VIEWS[v];
+    if (entering && entering.enter) entering.enter();
+    renderLearn();
+    const box = $('#paneLearn');
+    if (box) box.scrollTop = 0;
+    requestRender();
+  }
+  function bindLearn(box) {
+    box.querySelectorAll('[data-learn]').forEach((b) => b.addEventListener('click', () => openLearnView(b.dataset.learn)));
+    box.querySelectorAll('[data-lesson]').forEach((b) => b.addEventListener('click', () => openLesson(b.dataset.lesson)));
+    box.querySelectorAll('[data-example]').forEach((b) => b.addEventListener('click', () => {
+      if (refuseViewOnlyExample()) return;
+      pushUndo();
+      loadModel(buildExample(b.dataset.example), `Opened the example: ${EXAMPLES.find((e) => e[0] === b.dataset.example)[1]}`);
+      setWorkspace('analyze');
+    }));
+    box.querySelectorAll('[data-learn-act="empty"]').forEach((b) => b.addEventListener('click', () => {
+      if (refuseViewOnly()) return;
+      pushUndo();
+      state.learn.buildStarted = true;
+      loadModel(emptyModel(), 'New empty model: place three nodes');
+      state.view = { cx: 2, cy: 1.5, zoom: 60 };
+      updateZoomLabel();
+      setTool('node');
+      renderLearn();
+    }));
+  }
+  /** Opening an example replaces the model, which phones may do (opening is viewing); it stays undoable. */
+  const refuseViewOnlyExample = () => false;
+  /** Canvas hooks that later milestones fill (prediction marks, the free-body joint). */
+  function drawPredictionMarks(P) { if (typeof drawPredictionOverlay === 'function') drawPredictionOverlay(P); }
+  function drawFbdHighlight(P) {
+    if (typeof drawFbdOverlay === 'function') drawFbdOverlay(P);
+    if (typeof drawExplorerOverlay === 'function') drawExplorerOverlay(P);
+    if (typeof drawDesignOverlay === 'function') drawDesignOverlay(P);
+  }
+  /** Called whenever the selection changes, so a Learn activity can follow it. */
+  function onSelectionChanged() {
+    if (state.s.workspace === 'learn') {
+      const v = LEARN_VIEWS[state.learn.view];
+      if (v && v.onSelect) v.onSelect();
+    }
+  }
+
+  /* =====================================================================
+   * 20. Design workspace (milestones 6 and 10)
+   * ===================================================================== */
+  /** Structural mass Σ ρ·A·L from the materials' densities; a missing density is reported, never assumed. */
+  function massSummary() {
+    let mass = 0, missing = 0;
+    const byGroup = new Map();
+    for (const e of state.model.members) {
+      const w = memberSelfWeight(e);
+      if (w.density === null) { missing++; continue; }
+      const m = w.density * w.A * w.L;
+      mass += m;
+      byGroup.set(e.group, (byGroup.get(e.group) || 0) + m);
+    }
+    return { mass, missing, byGroup };
+  }
+
+  /* ---------- milestone 10: checks over every state, the deflection criterion, section sizing ---------- */
+  const TDS = window.TrussDesign || null;
+  if (!state.design) state.design = { families: {}, which: 'auto', report: null, reportKey: '', maxIterations: 20 };
+  const designWhich = () => (state.design.which === 'auto' ? undefined : state.design.which);
+  const stateName = (st) => (st ? `${st.kind === 'combination' ? 'combination' : 'load case'} “${esc(st.name)}”` : '—');
+  function renderDesignMilestone10() {
+    if (!TDS) return '<p class="note warn-note">design.js did not load, so the design tools are unavailable.</p>';
+    const M = state.model, target = state.s.targetSF;
+    if (!M.members.length) return '<p class="panel-intro">Add members to check and size them.</p>';
+    const states = TDS.designStates(M, designWhich());
+    const which = state.design.which;
+    let h = '';
+    // 1. checks over every state
+    const chk = TDS.checkDesign(M, { which: designWhich(), targetSF: target });
+    const fails = chk.members.filter((x) => !x.pass).length;
+    const statusCls = !chk.complete ? 'bad' : chk.pass ? 'ok' : 'bad';
+    const statusTxt = !chk.complete ? `✕ ${chk.unsolved.length} of ${states.length} states cannot be solved (${chk.unsolved.map(stateName).join(', ')}): nothing can be said about every state.`
+      : chk.pass ? `✓ Every member has SF ≥ ${fmt(target, 3)} in every state. Lowest: SF ${fmt(chk.governing.minSF, 3)} at M${chk.governing.member + 1} (${chk.governing.mode}), ${stateName(chk.governing.state)}.`
+        : `✕ ${plural(fails, 'member')} below SF ${fmt(target, 3)}. Lowest: SF ${fmt(chk.governing.minSF, 3)} at M${chk.governing.member + 1} (${chk.governing.mode}), ${stateName(chk.governing.state)}.`;
+    const low = chk.members.slice().sort((a, b) => a.minSF - b.minSF).slice(0, 8);
+    h += `<details class="sec" open><summary>Strength and buckling<span class="sum-meta">${chk.complete ? (chk.pass ? '✓ all pass' : `✕ ${fails} below target`) : '✕ incomplete'}</span></summary><div class="sec-body">
+      <div class="row"><label class="grow" for="dsWhich">Check against</label><select class="select" id="dsWhich">
+        <option value="auto" ${which === 'auto' ? 'selected' : ''}>${M.combinations.length ? 'every combination' : 'every load case'} (default)</option>
+        <option value="combinations" ${which === 'combinations' ? 'selected' : ''} ${M.combinations.length ? '' : 'disabled'}>every combination</option>
+        <option value="cases" ${which === 'cases' ? 'selected' : ''}>every load case</option>
+        <option value="active" ${which === 'active' ? 'selected' : ''}>only what is analysed</option></select></div>
+      <p class="note">${plural(states.length, 'state')}, each solved directly with λ = 1 (factors belong in the combinations); the worst value per member is taken, never a sum. Target SF ${fmt(target, 3)} (Analyze, Analysis).</p>
+      <div class="status-line ${statusCls}">${statusTxt}</div>
+      ${chk.complete ? `<table class="size-table"><thead><tr><th class="l">Member</th><th>lowest SF</th><th class="l">mode</th><th class="l">in</th></tr></thead><tbody>${low.map((x) => `<tr><td class="l"><button class="btn quiet sm" data-dsel="${x.member}">M${x.member + 1}</button></td><td class="${x.pass ? '' : 'bad'}">${fmt(x.minSF, 3)}</td><td class="l">${x.mode}</td><td class="l">${esc(x.state ? x.state.name : '')}</td></tr>`).join('')}</tbody></table>` : ''}
+      <p class="assume">Yield: SF = σ<sub>y</sub>/|σ|. Buckling: Euler, pin-ended (K = 1), weak-axis I: SF = P<sub>cr</sub>/|N|. An educational check: no resistance factors, imperfections or code rules.</p>
+      </div></details>`;
+    // 2. deflection
+    const crit = TDS.criterion(M), dfl = TDS.checkDeflection(M, { which: designWhich() });
+    const nodeOpts = (sel) => M.nodes.map((n, i) => `<option value="${i}" ${n === sel ? 'selected' : ''}>N${i + 1}</option>`).join('');
+    // the draft holds node objects: after undo, redo or an open, the model has new ones, so rebuild it from the model
+    const stale = (d) => !M.nodes.includes(d.a) || !M.nodes.includes(d.b) || d.nodes.some((n) => !M.nodes.includes(n));
+    if (state.design.edit && stale(state.design.edit)) state.design.edit = null;
+    const ed = state.design.edit || (state.design.edit = { a: crit ? crit.a : M.nodes[0], b: crit ? crit.b : M.nodes[M.nodes.length > 1 ? 1 : 0], nodes: crit ? crit.nodes.slice() : [], type: crit ? crit.limit.type : 'ratio', value: crit ? crit.limit.value : 300 });
+    let dStatus;
+    if (dfl.status === 'unconfigured') dStatus = '<div class="status-line idle">○ Not configured: no deflection limit is checked. TrussLab does not assume one.</div>';
+    else if (dfl.status === 'invalid') dStatus = `<div class="status-line bad">✕ ${esc(dfl.reason)}</div>`;
+    else if (dfl.status === 'incomplete') dStatus = `<div class="status-line bad">✕ ${dfl.unsolved.length} state(s) cannot be solved, so the deflection is not known in every state.</div>`;
+    else dStatus = `<div class="status-line ${dfl.status === 'pass' ? 'ok' : 'bad'}">${dfl.status === 'pass' ? '✓' : '✕'} Largest δ = ${fD(dfl.governing.delta)} ${state.s.dispUnit} at N${dfl.governing.node + 1}, ${stateName(dfl.governing.state)}; allowed ${fD(dfl.allow)} ${state.s.dispUnit}${crit.limit.type === 'ratio' ? ` (span ${fmt(dfl.span, 4)} m / ${fmt(crit.limit.value, 4)})` : ''}.</div>`;
+    h += `<details class="sec" ${crit ? 'open' : ''}><summary>Deflection<span class="sum-meta">${dfl.status === 'unconfigured' ? 'not set' : dfl.status === 'pass' ? '✓ pass' : '✕'}</span></summary><div class="sec-body">
+      <p class="note">Deflection is measured against a <b>reference chord</b>: the line between two nodes you choose (for example the two supports). For each evaluation node, δ is its displacement across that line, relative to the line's own movement, so a support settlement that only moves or tilts the truss as a whole is not counted.</p>
+      <fieldset class="edit"><div class="form-grid">
+        <label for="dfA">Chord from</label><select class="select" id="dfA">${nodeOpts(ed.a)}</select>
+        <label for="dfB">to</label><select class="select" id="dfB">${nodeOpts(ed.b)}</select>
+        <label>Check nodes</label><div class="node-chips" role="group" aria-label="Evaluation nodes">${M.nodes.map((n, i) => `<button class="btn sm ${ed.nodes.includes(n) ? 'toggle on' : ''}" aria-pressed="${ed.nodes.includes(n)}" data-dfnode="${i}">N${i + 1}</button>`).join('')}</div>
+        <label for="dfType">Limit</label><select class="select" id="dfType"><option value="ratio" ${ed.type === 'ratio' ? 'selected' : ''}>span / ratio</option><option value="absolute" ${ed.type === 'absolute' ? 'selected' : ''}>absolute (${state.s.dispUnit})</option></select>
+        <label for="dfValue">${ed.type === 'ratio' ? 'Ratio' : 'Value'}</label><div class="inline"><input class="num" id="dfValue" value="${inVal(ed.type === 'ratio' ? ed.value : ed.value / dU())}"><span class="u">${ed.type === 'ratio' ? 'span/…' : state.s.dispUnit}</span></div>
+      </div>
+      <div class="btn-row"><button class="btn sm primary" id="dfSave">${crit ? 'Update the criterion' : 'Set the criterion'}</button>${crit ? '<button class="btn sm danger" id="dfClear">Remove</button>' : ''}</div></fieldset>
+      <p class="note">The limit is yours to choose (for example span/300 for a roof member, or a value from your design code): TrussLab never imposes a universal limit.</p>
+      ${dStatus}
+      ${dfl.per ? `<details class="more"><summary>Every state</summary><table class="size-table"><thead><tr><th class="l">State</th><th class="l">node</th><th>δ [${state.s.dispUnit}]</th><th>total |u| [${state.s.dispUnit}]</th></tr></thead><tbody>${dfl.per.filter((x) => x.d).flatMap((x) => x.d.nodes.map((nd) => `<tr><td class="l">${esc(x.state.name)}</td><td class="l">N${nd.node + 1}</td><td class="${nd.pass ? '' : 'bad'}">${fD(nd.delta)}</td><td>${fD(nd.total)}</td></tr>`)).join('')}</tbody></table><p class="note">The total displacement includes rigid-body movement; δ does not.</p></details>` : ''}
+      </div></details>`;
+    // 3. section sizing
+    const R0 = state.design.report && state.design.reportKey === predictKey() ? state.design.report : null;
+    if (state.design.report && !R0) { state.design.report = null; }
+    h += `<details class="sec" open><summary>Section sizing</summary><div class="sec-body">
+      <p class="note">Fully stressed design: each sized group gets the lightest section of its family that passes yield and buckling (target SF ${fmt(target, 3)}) in every state; then the truss is analysed again, because self-weight and, in an indeterminate truss, the forces change with the sections. It stops when the choice repeats (converged), cycles, or reaches the iteration limit. ${crit ? 'If the deflection limit then fails, the group that contributes most to it per kilogram is stepped up, and strength is checked again.' : ''}</p>
+      <table class="size-table"><thead><tr><th class="l">Group</th><th class="l">current</th><th class="l">family</th></tr></thead><tbody>${M.groups.map((g, i) => {
+        const fam = state.design.families[i] !== undefined ? state.design.families[i] : TDS.defaultFamily(g);
+        return `<tr><td class="l"><span class="swatch" style="background:${esc(g.color)}"></span>${esc(g.name)}</td><td class="l">${fmt(g.A / MM2, 4)} mm²</td><td class="l"><select class="select" data-dfam="${i}" aria-label="Family for ${esc(g.name)}"><option value="keep" ${fam === 'keep' ? 'selected' : ''}>keep</option>${TDS.FAMILIES.map((f) => `<option value="${f}" ${fam === f ? 'selected' : ''}>${esc(TDS.FAMILY_DEFS[f].label.split(' (')[0])}</option>`).join('')}</select></td></tr>`;
+      }).join('')}</tbody></table>
+      <div class="btn-row"><button class="btn primary sm" id="dsRun">Propose sections</button></div>
+      ${R0 ? sizingReportHtml(R0) : ''}
+      </div></details>`;
+    return h;
+  }
+  function sizingReportHtml(r) {
+    const fu = state.s.forceUnit;
+    const st = {
+      converged: ['ok', '✓ Converged: every sized group is stable from one iteration to the next, and the final analysis passes.'],
+      cycle: ['bad', '✕ Not converged: the choice of sections came back to an earlier one (a cycle). No proposal is offered.'],
+      'max-iterations': ['bad', `✕ Not converged within ${state.design.maxIterations} iterations. No proposal is offered.`],
+      'no-candidate': ['bad', '✕ No candidate in the chosen family is large enough for at least one group.'],
+      'deflection-not-met': ['bad', '✕ Strength and buckling can be met, but the deflection limit cannot: no proposal is acceptable.'],
+      unstable: ['bad', '✕ The structure is unstable in at least one state: it cannot be sized.'],
+      invalid: ['bad', '✕ The model cannot be analysed in at least one state.'],
+      'nothing-to-size': ['idle', '○ Choose a family for at least one group.'],
+      'no-states': ['idle', '○ There is nothing to check: add a load case.'],
+    }[r.status] || ['bad', r.status];
+    let h = `<div class="status-line ${r.acceptable ? 'ok' : st[0]}">${r.acceptable ? '✓ ' + st[1].slice(2) : st[1]}</div>`;
+    if (!r.groups.length) return h;
+    h += `<table class="size-table"><thead><tr><th class="l">Group</th><th class="l">proposed</th><th class="l">governed by</th></tr></thead><tbody>${r.groups.map((g) => `<tr><td class="l">${esc(g.name)}</td><td class="l"><b>${esc(g.to.label)}</b><br><span class="dim">A ${fmt(g.to.A / MM2, 4)} mm², I ${fmt(g.to.I / MM4, 3)} mm⁴</span></td><td class="l">${g.governs ? `M${g.governs.member + 1}, ${g.governs.mode}, ${esc(g.governs.state.name)} (N = ${fF(g.governs.N)} ${fu})` : '—'}</td></tr>`).join('')}</tbody></table>`;
+    h += `<details class="explain" ${openIfGuided()}><summary>Why these sections</summary>${r.groups.map((g) => {
+      const l = g.lighter;
+      const why = !l ? 'It is the lightest section of the family.' : l.check === 'yield' ? `${esc(l.candidate)}, the next lighter one, fails yield at M${l.member + 1} in ${esc(l.state.name)}: it needs A ≥ ${fmt(l.required / MM2, 4)} mm² and has ${fmt(l.have / MM2, 4)} mm².`
+        : l.check === 'buckling' ? `${esc(l.candidate)}, the next lighter one, would buckle at M${l.member + 1} in ${esc(l.state.name)}: it needs I ≥ ${fmt(l.required / MM4, 4)} mm⁴ (from P<sub>cr</sub> = π²EI/L², K = 1) and has ${fmt(l.have / MM4, 4)} mm⁴.`
+          : l.check === 'no-inertia' ? `${esc(l.candidate)} has no second moment of area, so its buckling cannot be checked: it is not used for compression members.`
+            : `${esc(l.candidate)} passes the strength checks, but it was stepped up to meet the deflection limit.`;
+      return `<p><b>${esc(g.name)}: ${esc(g.to.label)}.</b> ${why}</p>`;
+    }).join('')}</details>`;
+    const mb = r.mass.before, ma = r.mass.after;
+    h += `<dl class="kv"><dt>Mass now</dt><dd>${fmt(mb.mass, 5)} kg${mb.complete ? '' : ' <small>incomplete</small>'}</dd><dt>Mass proposed</dt><dd>${fmt(ma.mass, 5)} kg${ma.complete ? '' : ' <small>incomplete</small>'}</dd>
+      <dt>Lowest SF</dt><dd>${r.check && r.check.governing ? `${fmt(r.check.governing.minSF, 3)} <small>M${r.check.governing.member + 1}, ${r.check.governing.mode}</small>` : '—'}</dd>
+      <dt>Deflection</dt><dd>${r.deflection.status === 'unconfigured' ? '<small>not configured</small>' : r.deflection.governing ? `${fD(r.deflection.governing.delta)} ${state.s.dispUnit} <small>${r.deflection.status}</small>` : r.deflection.status}</dd></dl>`;
+    if (!mb.complete || !ma.complete) h += '<p class="note warn-note">Some materials have no density: their members are left out of the mass, and candidates are ranked by area.</p>';
+    h += `<details class="more"><summary>Iterations (${r.iterations.length})</summary><div class="iter-log">${r.iterations.map((it) => `${it.iteration}: ${it.selection.join(', ')} → ${it.next.join(', ')} (${fmt(it.mass, 4)} kg)`).join('<br>')}${r.notes.length ? '<br>' + r.notes.map(esc).join('<br>') : ''}</div></details>`;
+    h += `<div class="btn-row"><button class="btn primary sm" id="dsApply" ${r.acceptable ? '' : 'disabled'} title="${r.acceptable ? 'Replace the sections of the sized groups (Ctrl+Z undoes it)' : 'Only an acceptable, converged proposal can be applied'}">Apply the proposal</button><button class="btn sm quiet" id="dsDiscard">Discard</button></div>`;
+    return h;
+  }
+  function bindDesignMilestone10(box) {
+    if (!TDS) return;
+    const M = state.model;
+    const on = (id, ev, fn) => { const el = box.querySelector('#' + id); if (el) el.addEventListener(ev, fn); };
+    on('dsWhich', 'change', (e) => { state.design.which = e.target.value; state.design.report = null; renderDesignTools(); });
+    box.querySelectorAll('[data-dsel]').forEach((b) => b.addEventListener('click', () => selectOnly('member', M.members[+b.dataset.dsel])));
+    const ed = state.design.edit;
+    on('dfA', 'change', (e) => { ed.a = M.nodes[+e.target.value]; });
+    on('dfB', 'change', (e) => { ed.b = M.nodes[+e.target.value]; });
+    on('dfType', 'change', (e) => { ed.type = e.target.value; ed.value = ed.type === 'ratio' ? 300 : 0.01; renderDesignTools(); });
+    on('dfValue', 'change', (e) => { const v = evalNum(e.target.value); if (Number.isFinite(v) && v > 0) ed.value = ed.type === 'ratio' ? v : v * dU(); else { e.target.classList.add('invalid'); toast('The limit must be a positive number', 'bad'); } });
+    box.querySelectorAll('[data-dfnode]').forEach((b) => b.addEventListener('click', () => {
+      const n = M.nodes[+b.dataset.dfnode], i = ed.nodes.indexOf(n);
+      if (i >= 0) ed.nodes.splice(i, 1); else ed.nodes.push(n);
+      renderDesignTools(); requestRender();
+    }));
+    on('dfSave', 'click', () => {
+      if (refuseViewOnly()) return;
+      if (!ed.nodes.length) { toast('Choose at least one node to check', 'warn'); return; }
+      pushUndo();
+      if (!setDeflectionCriterion(M, { a: ed.a, b: ed.b, nodes: ed.nodes, limit: { type: ed.type, value: ed.value } })) {
+        history.undo.pop(); updateUndoButtons();
+        toast('The chord needs two different nodes, and the limit a positive value', 'bad'); return;
+      }
+      modelChanged({ keepInspector: true }); toast('Deflection criterion set (Ctrl+Z undoes it)', 'ok');
+    });
+    on('dfClear', 'click', () => { if (refuseViewOnly()) return; pushUndo(); setDeflectionCriterion(M, null); state.design.edit = null; modelChanged({ keepInspector: true }); toast('Deflection criterion removed (Ctrl+Z undoes it)'); });
+    box.querySelectorAll('[data-dfam]').forEach((s) => s.addEventListener('change', () => { state.design.families[+s.dataset.dfam] = s.value; state.design.report = null; renderDesignTools(); }));
+    on('dsRun', 'click', () => {
+      const fams = {};
+      M.groups.forEach((g, i) => { fams[i] = state.design.families[i] !== undefined ? state.design.families[i] : TDS.defaultFamily(g); });
+      state.design.report = TDS.sizeSections(M, { families: fams, targetSF: state.s.targetSF, which: designWhich(), maxIterations: state.design.maxIterations });
+      state.design.reportKey = predictKey();
+      renderDesignTools(); requestRender();
+    });
+    on('dsDiscard', 'click', () => { state.design.report = null; renderDesignTools(); requestRender(); });
+    on('dsApply', 'click', () => {
+      const r = state.design.report;
+      if (refuseViewOnly() || !r || !r.acceptable) return;
+      pushUndo();
+      for (const g of r.groups) {
+        const grp = M.groups[g.group];
+        TDS.applyCandidate(grp, g.to);
+        grp.name = `${grp.name.includes(':') ? grp.name.split(':')[0] : grp.name}: ${g.to.label}`.slice(0, 80);
+      }
+      state.design.report = null;
+      modelChanged({ groups: true });
+      toast(`Applied the proposed sections to ${plural(r.groups.length, 'group')} (Ctrl+Z undoes it)`, 'ok');
+    });
+  }
+  /** The deflection criterion on the canvas (Design workspace): the reference chord dashed, the checked nodes boxed. */
+  function drawDesignOverlay(P) {
+    if (state.s.workspace !== 'design' || !TDS) return;
+    const c = TDS.criterion(state.model), ed = state.design.edit;
+    if (!c && !(ed && ed.nodes.length)) return; // nothing set, and no draft being chosen
+    const a = c ? c.a : ed.a, b = c ? c.b : ed.b, nodes = ed ? ed.nodes : c.nodes;
+    if (!a || !b || !P.has(a) || !P.has(b)) return;
+    const pa = P.get(a), pb = P.get(b);
+    ctx.save();
+    ctx.setLineDash([8, 5]); ctx.strokeStyle = COL.accent2; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.stroke(); ctx.setLineDash([]);
+    ctx.font = `12px ${SANS}`; tag('reference chord', (pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2 + 16, 'center', 'top', COL.accent2);
+    for (const n of nodes) { if (!P.has(n)) continue; const [x, y] = P.get(n); ctx.strokeStyle = COL.accent2; ctx.lineWidth = 1.6; ctx.strokeRect(x - 9, y - 9, 18, 18); }
+    ctx.restore();
+  }
+
+  /** After an edit or a solve: refresh the Design panel unless the user is typing in it. */
+  function refreshDesignLive() {
+    const box = $('#designTools'), a = document.activeElement;
+    if (box && a && box.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT')) return;
+    renderDesignTools();
+  }
+  function renderDesignTools() {
+    const box = $('#designTools');
+    if (!box) return;
+    const ms = massSummary();
+    let h = `<details class="sec" open><summary>Structure<span class="sum-meta">${fmt(ms.mass, 4)} kg</span></summary><div class="sec-body">
+      <dl class="kv"><dt>Mass Σ ρ·A·L</dt><dd>${fmt(ms.mass, 5)} kg</dd>
+      ${state.model.groups.map((g) => `<dt><span class="swatch" style="background:${esc(g.color)}"></span>${esc(g.name)}</dt><dd>${fmt(ms.byGroup.get(g) || 0, 4)} kg</dd>`).join('')}</dl>
+      ${ms.missing ? `<p class="note warn-note">${plural(ms.missing, 'member')} ${ms.missing > 1 ? 'have' : 'has'} a material without density, so ${ms.missing > 1 ? 'they are' : 'it is'} not in this mass. Enter the density ρ under Materials.</p>` : ''}
+      </div></details>`;
+    if (typeof renderDesignMilestone10 === 'function') h += renderDesignMilestone10();
+    box.innerHTML = h;
+    box.querySelectorAll('fieldset.edit').forEach((f) => { f.disabled = isViewOnly(); });
+    if (typeof bindDesignMilestone10 === 'function') bindDesignMilestone10(box);
   }
 
   init();

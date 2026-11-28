@@ -1439,6 +1439,40 @@ testCase('Combinations on the nine examples', () => {
   }
 });
 
+testCase('Design data (milestone 10): the deflection criterion is saved, read and checked', () => {
+  const m = TM.buildExample('aframe'), [A, B, P] = [m.nodes[0], m.nodes[1], m.nodes[2]];
+  check('a new model, and the examples, have no criterion', m.design && m.design.deflection === null && TM.emptyModel().design.deflection === null);
+  check('without a criterion nothing is written (the file is exactly as before milestone 10)', !('design' in TM.serialize(m)));
+  check('setting a valid criterion', TM.setDeflectionCriterion(m, { a: A, b: B, nodes: [P, P], limit: { type: 'ratio', value: 300 } }) && m.design.deflection.nodes.length === 1);
+  same('it is written with node ids', TM.serialize(m).design, { deflection: { chordA: 1, chordB: 2, nodes: [3], limit: { type: 'ratio', value: 300 } } });
+  const back = TM.readModel(JSON.parse(JSON.stringify(TM.serialize(m)))).model;
+  check('reading it back restores the same nodes and limit', back.design.deflection.a === back.nodes[0] && back.design.deflection.b === back.nodes[1] && back.design.deflection.nodes[0] === back.nodes[2] && back.design.deflection.limit.value === 300);
+  check('invalid criteria are refused: one node twice, a limit of 0, an unknown limit type, a node of another model',
+    !TM.setDeflectionCriterion(m, { a: A, b: A, nodes: [], limit: { type: 'ratio', value: 300 } }) && !TM.setDeflectionCriterion(m, { a: A, b: B, nodes: [], limit: { type: 'ratio', value: 0 } }) &&
+    !TM.setDeflectionCriterion(m, { a: A, b: B, nodes: [], limit: { type: 'percent', value: 2 } }) && !TM.setDeflectionCriterion(m, { a: A, b: TM.makeNode(9, 9), nodes: [], limit: { type: 'ratio', value: 300 } }));
+  const base = TM.serialize(m);
+  const read = (design) => TM.readModel(Object.assign(JSON.parse(JSON.stringify(base)), { design }));
+  const bad = [
+    ['not an object', 'x', /design data is not an object/],
+    ['chord nodes that do not exist', { deflection: { chordA: 1, chordB: 9, nodes: [3], limit: { type: 'ratio', value: 300 } } }, /not two different nodes/],
+    ['the same node twice', { deflection: { chordA: 2, chordB: 2, nodes: [3], limit: { type: 'ratio', value: 300 } } }, /not two different nodes/],
+    ['a negative limit', { deflection: { chordA: 1, chordB: 2, nodes: [3], limit: { type: 'ratio', value: -1 } } }, /not a positive ratio or length/],
+  ];
+  for (const [what, design, pattern] of bad) {
+    const r = read(design);
+    check(`a malformed criterion (${what}) is left out with a note, and the model still reads`, r.model.design.deflection === null && r.notes.some((n) => pattern.test(n.msg)) && r.model.members.length === 2);
+  }
+  const skip = read({ deflection: { chordA: 1, chordB: 2, nodes: [3, 7, 'x'], limit: { type: 'absolute', value: '0.01' } } });
+  check('unknown evaluation nodes are skipped with a note each; a numeric string limit is read', skip.model.design.deflection.nodes.length === 1 && skip.notes.filter((n) => /does not exist/.test(n.msg)).length === 2 && skip.model.design.deflection.limit.value === 0.01);
+  check('a file without design data reads with no criterion and no note', read(undefined).model.design.deflection === null && read(undefined).notes.length === 0);
+  check('version 1 files have no criterion', TM.readModel({ format: 'trusslab-model', version: 1, nodes: [{ id: 1, x: 0, y: 0 }], members: [] }).model.design.deflection === null);
+  // deleting nodes prunes the criterion
+  m.nodes.splice(2, 1);
+  check('deleting an evaluation node removes it from the criterion', TM.pruneDesign(m) === 'nodes' && m.design.deflection.nodes.length === 0);
+  m.nodes.splice(1, 1);
+  check('deleting a reference node removes the criterion', TM.pruneDesign(m) === 'criterion' && m.design.deflection === null);
+});
+
 out('');
 out(`${passed} passed, ${failures.length} failed`);
 if (failures.length) {

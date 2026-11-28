@@ -6,7 +6,7 @@ The maintainer's machine is a Mac (MacBook Air M2) running Chrome, with the proj
 
 ## Opening the app
 
-Double-click `index.html`. If the page shows plain text and unstyled sliders on a white background, the browser loaded `index.html` but not the files beside it (`style.css`, `fea-core.js`, `script.js`).
+Double-click `index.html`. If the page shows plain text and unstyled sliders on a white background, the browser loaded `index.html` but not the files beside it (`style.css`, `fonts/`, `fea-core.js`, `model.js`, `education.js`, `design.js`, `lessons.js`, `script.js`). If the page is styled but uses a system font instead of IBM Plex, the browser refused the font files in `fonts/` for the same reason.
 
 ### macOS protected folders
 
@@ -47,7 +47,19 @@ This runs from any folder. It uses Node if it is installed; otherwise it uses th
 2. Open `index.html`, add `?smoke` to the end of the address, and press Enter. Keep the tab in front and don't touch it for about 10 seconds: browsers pause the animation frames that the app solves and draws on in background tabs.
 3. Expected: the panel in the top-right corner ends with "TrussLab smoke test: PASS". One SKIP is normal, for the side-panel branch that doesn't match the window width. A browser without `DataTransfer` also skips the file-opening checks.
 4. Open `index.html?smoke=selftest`. Expected: PASS, with exactly one failure, the deliberate one.
-5. Optional: make the window narrower than 920 px and run `?smoke` again, to cover the narrow-window panel branch.
-6. Open plain `index.html`. Your previous session should come back as before.
+5. Optional: make the window 1100 px wide or less and run `?smoke` again, to cover the narrow-window panel branch.
+6. Optional: open plain `index.html` on a phone, or in the browser's device mode at 390 px, and check the view-only layout: the note under the header, the canvas, then the Inspector and the workspace panel stacked; drawing tools and edit forms disabled.
+7. Open plain `index.html`. Your previous session and your lesson progress should come back as before.
 
 To report the result, send the summary line from each run and any FAIL lines. The browser console shows the same lines, prefixed `[smoke]`.
+
+## Browser smoke test in headless Chrome
+
+```sh
+python3 -I .claude/skills/trusslab-testing/scripts/browser_check.py               # both smoke modes
+python3 -I .claude/skills/trusslab-testing/scripts/browser_check.py --shots /tmp/tl # and screenshots
+```
+
+The script starts Google Chrome headless with a throwaway profile (your Chrome profile and its storage are never touched), opens `index.html?smoke` and `index.html?smoke=selftest` as `file://` pages, waits for `window.TrussLabSmokeResult`, prints both verdicts and any FAIL lines, and exits with 1 unless both are PASS. With `--shots DIR` it also saves screenshots at 1440 × 900, 1280 × 800, 1024 × 768 and 390 × 844 (phone, with touch emulation). It uses only the Python standard library and talks to Chrome through its DevTools protocol; set `CHROME` to the browser binary if it is not at `/Applications/Google Chrome.app`.
+
+This is a development aid, like the local server: the app never depends on it. It does not replace a run in a visible browser for things a headless page cannot show (native pointer capture, real touch, font rendering on your screen), and it drives Chrome only: Safari and Firefox still need a manual run.

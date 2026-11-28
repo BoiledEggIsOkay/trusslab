@@ -23,12 +23,15 @@ A feature that truly needs a network goes into the documentation as an optional 
 |---|---|---|
 | `fea-core.js` | Numerical engine, no DOM | `FEA` (plus `module.exports` under Node) |
 | `model.js` | DOM-free model layer: parser, sections, constructors, supports, load cases and the generated self-weight case, load combinations (`analyzeCombination`, `combinationEnvelope`), serialisation, examples, solver input (`toAnalysisInput`) | `TrussModel` (plus `module.exports` under Node) |
+| `education.js` | DOM-free teaching logic (milestones 6–9): the guided build, worked calculations (`memberCalc`, `nodeCalc`, `jointForces`), predictions and zero-force rules, free-body diagrams (`fbd`), the method of joints (`jointExercise`, `nextJoint`, `checkJointAnswers`), the Solver Explorer (`explorer`, `memberTransformation`, `assemblyContribution`, `entryContributions`). Reads `FEA.analyze()` results; never solves | `TrussEducation` |
+| `design.js` | DOM-free design logic (milestone 10): section catalogue (`family`), states and checks (`designStates`, `checkDesign`), reference-chord deflection (`chordDeflection`, `checkDeflection`), fully stressed sizing (`sizeSections`, `iterateSelections`). Works on a copy; never changes the model | `TrussDesign` |
+| `lessons.js` | DOM-free curriculum (milestone 11): `LESSONS`, `evaluateChallenge`, `checkAnswer`, lesson progress with injected `Storage` (`loadProgress`, `saveProgress`) | `TrussLessons` |
 | `script.js` | All page code: one IIFE in numbered sections | `TrussLab` (older hook), `TrussLabTest` (smoke mode only) |
-| `index.html`, `style.css` | Layout, help dialog, theme | none |
+| `index.html`, `style.css`, `fonts/` | Layout, help dialog, the design tokens and components, the bundled IBM Plex subsets (SIL OFL 1.1) | none |
 | `test/*.test.js` | Headless suites (jsc or Node) | none |
 | `test/browser-smoke.js` | Browser smoke test, loaded by `index.html?smoke` | `TrussLabSmokeResult` (summary) |
 
-A script may use, at load time, only the globals defined by scripts above it in `index.html`. `script.js` reads what it needs once at the top of its IIFE. If a required global is missing, show a clear message on the page the way `script.js` already does when `fea-core.js` or `model.js` has not loaded, instead of failing silently.
+Load order in `index.html`: `fea-core.js`, `model.js`, `education.js`, `design.js`, `lessons.js`, `script.js`. A script may use, at load time, only the globals defined by scripts above it in `index.html`. `script.js` reads what it needs once at the top of its IIFE. If a required global is missing, show a clear message on the page the way `script.js` already does when `fea-core.js` or `model.js` has not loaded, instead of failing silently.
 
 ## Pattern for a DOM-free file
 
@@ -62,14 +65,19 @@ Functions that turn the model into solver input or results must not mutate the m
 
 ## `script.js`
 
-One IIFE in numbered sections: 1 helpers and formatting, 2 the display text for supports (`supportText`; the model objects are in `model.js`), 3 a note only (the examples are in `model.js`), 4 state, history and persistence, 5 analysis driver, 6 view, snapping and picking, 7 rendering, 8 editing, 9 pointer and keyboard, 10 left panel, 11 inspector, 12 status and health report, 13 bottom panel, 14 export, 15 miscellaneous UI, 16 start-up, 17 testing adapter.
+One IIFE in numbered sections: 1 helpers and formatting, 2 the display text for supports (`supportText`; the model objects are in `model.js`), 3 a note only (the examples are in `model.js`), 4 state, history and persistence, 5 analysis driver, 6 view, snapping and picking, 7 rendering (the canvas palette is read from the CSS tokens by `readPalette()`), 8 editing, 9 pointer and keyboard, 10 left panel, 11 inspector (with the worked-calculation formatting: `calcStep`, `mathHtml`, `qSI`, `qShow`), 12 status and results report, 13 data drawer, 14 export, 15 miscellaneous UI, 16 start-up, 17 testing adapter, 18 workspaces, presentation modes, menus, layout and the phone view-only mode, 19 the Learn workspace (activities register in `LEARN_ACTIVITIES` and `LEARN_VIEWS`: build, predict, fbd, joints, explorer, lesson), 20 the Design workspace.
+
+Cross-cutting rules in the page code:
+- **Every result shown goes through `R()`**, which returns null while a Learn exercise hides the results (`resultsHidden()`: the prediction until checked, the method of joints until complete). Code that reads `state.res` directly (Results, matrices, log, legend) checks `resultsHidden()` itself.
+- **Every edit entry point checks the view-only state** (`isViewOnly()`, `refuseViewOnly()`): canvas tools, keyboard shortcuts, Inspector fields and actions, panel buttons. Editing forms are wrapped in `fieldset.edit`, which `applyViewOnly()` disables; forms rendered later must set it too (as `renderDesignTools` does).
+- Workspace, Guided/Technical and the right tab are settings (`workspace`, `uiMode`, `rightTab`), changed only through `setWorkspace`, `setUiMode`, `setRightTab`.
 
 Put new page code in the matching section. The sections call each other in both directions (undo in §4 calls `modelChanged` in §8; `solve` in §5 calls `refreshResults` in §12). So do not split `script.js` into one file per section. Move code out only when a milestone calls for it, and then along real boundaries: DOM-free logic first, then large UI areas such as rendering, panels, input or exports.
 
 ## Test interfaces
 
 - `window.TrussLab` = `{ state, solve, buildExample, loadModel, serialize, deserialize, parseExpr, sectionProps }`. It hands out live internal state. Keep it working with the same members for compatibility, but do not write new code or tests against it.
-- `window.TrussLabTest` (version 2 since milestone 3) exists only with `?smoke`. Its queries return plain copies (`model()` is file format version 2); `capture`/`restore`/`diff` provide isolation. It also exposes `storageKey`, `storageKeys` (the smoke-test keys), `userStorageKey`, `userStorageKeys` (every key that may hold the user's work, which the test checks are unchanged), `reloadStoredSession()` (runs start-up's session handling again, on the smoke-test keys) and `saveNow()`. Additive changes keep the version. A breaking change bumps it and updates `test/browser-smoke.js` in the same commit.
+- `window.TrussLabTest` (version 2 since milestone 3) exists only with `?smoke`. Its queries return plain copies (`model()` is file format version 2); `capture`/`restore`/`diff` provide isolation. It also exposes `storageKey`, `storageKeys` (the smoke-test keys), `userStorageKey`, `userStorageKeys` (every key that may hold the user's work, which the test checks are unchanged: the sessions, their backups, and the lesson progress `trusslab.learn.v1` with its `.unreadable` backup), `reloadStoredSession()` (runs start-up's session handling again, on the smoke-test keys), `saveNow()`, and since milestone 6 `layout()` (`'wide'`, `'narrow'` or `'phone'`), `viewOnly()` and `setViewOnlyForTest(on)` (a synthetic test cannot resize the window; `restore()` clears the override). Additive changes keep the version. A breaking change bumps it and updates `test/browser-smoke.js` in the same commit.
 
 ## Save files and autosave
 
@@ -79,3 +87,4 @@ The full description is in `../trusslab-engineering-rules/references/model-forma
 - Storage logic is DOM-free in `model.js` (`loadStoredSession`, `saveStoredSession`, `backupUnreadable`), with the storage object passed in. `script.js` passes a guarded `localStorage` (`STORE`) and the keys (`SESSION_KEYS`, or `SMOKE_SESSION_KEYS` in smoke mode); no other code touches `localStorage`.
 - Autosave: `scheduleSave()` waits 400 ms, then `saveNow()` writes `{ model, settings, view, importNotes }` under `trusslab.session.v2` and reads it back. A read that fails at start-up blocks all writes until a reload. Only the keys of `DEFAULT_SETTINGS` are stored. A version 1 session is migrated at start-up and its key removed only after a verified write; an unreadable version 2 session is backed up first. Failures show a persistent note in the status bar (`#sbSave`).
 - A format change bumps the version and must keep reading every earlier version's model files, autosaved sessions and report files, with a migration test for each.
+- Lesson progress (milestone 11) is not part of the session: `lessons.js` stores it under `trusslab.learn.v1` (smoke mode `trusslab.smoke-test.learn.v1`, cleared at the start of a smoke run) with the same rules: no write after a failed read, unreadable text copied to `KEY.unreadable` once, write verified by reading back.

@@ -160,7 +160,7 @@
     const g = makeGroup('Default: A 2000 mm²', steel, { type: 'custom' }, GROUP_COLORS[0], 2000 * MM2, 2.0e6 * MM4);
     const lc = makeLoadCase('Load case 1');
     return { title: title || 'Untitled truss', nodes: [], members: [], materials: [steel, alu, fir], groups: [g], loadCases: [lc], activeCase: lc,
-      combinations: [], activeCombination: null };
+      combinations: [], activeCombination: null, design: { deflection: null } };
   }
 
   const SUPPORT_TYPES = [
@@ -439,7 +439,7 @@
     const entries = (map, a, b) => model.nodes.filter((n) => map.has(n))
       .map((n) => { const v = map.get(n); return { node: ni.get(n), [a]: v[a], [b]: v[b] }; })
       .filter((e) => e[a] !== 0 || e[b] !== 0);
-    return {
+    const out = {
       format: 'trusslab-model', version: FORMAT_VERSION,
       units: { length: 'm', force: 'N', stress: 'Pa', area: 'm^2', inertia: 'm^4', angle: 'deg' },
       title: model.title,
@@ -457,7 +457,22 @@
         terms: c.terms.filter((t) => model.loadCases.includes(t.loadCase)).map((t) => ({ loadCase: model.loadCases.indexOf(t.loadCase) + 1, factor: t.factor })) })),
       activeCombination: model.activeCombination && (model.combinations || []).includes(model.activeCombination) ? model.combinations.indexOf(model.activeCombination) + 1 : null,
     };
+    // milestone 10: the reference-chord deflection criterion, written only when one is set (optional field)
+    const d = designDeflectionOut(model);
+    if (d) out.design = { deflection: d };
+    return out;
   }
+  /** The deflection criterion in file form (node ids), or null when none is set or its chord nodes are gone. */
+  function designDeflectionOut(model) {
+    const c = model.design && model.design.deflection;
+    if (!c) return null;
+    const id = (n) => model.nodes.indexOf(n) + 1;
+    if (!id(c.a) || !id(c.b) || c.a === c.b) return null;
+    return { chordA: id(c.a), chordB: id(c.b), nodes: c.nodes.map(id).filter((k) => k > 0), limit: { type: c.limit.type, value: c.limit.value } };
+  }
+  const LIMIT_TYPES = ['ratio', 'absolute'];
+  /** A valid deflection limit: a span/δ ratio above 0, or an absolute value in metres above 0. */
+  const validLimit = (l) => !!l && LIMIT_TYPES.includes(l.type) && typeof l.value === 'number' && Number.isFinite(l.value) && l.value > 0;
 
   /**
    * Reads a model file (format version 1 or 2), an autosaved session { model, settings, view } or an
@@ -476,7 +491,7 @@
     const fromVersion = Number(obj.version) === 2 ? 2 : 1;
     const notes = [];
     const model = readStructure(obj, notes);
-    if (fromVersion === 2) { readLoadCasesV2(obj, model, notes); readCombinationsV2(obj, model, notes); } else migrateV1(obj, model, notes);
+    if (fromVersion === 2) { readLoadCasesV2(obj, model, notes); readCombinationsV2(obj, model, notes); readDesignV2(obj, model, notes); } else migrateV1(obj, model, notes);
     return { model, fromVersion, notes };
   }
   /** readModel without the notes (the interface script.js and window.TrussLab have always used). */
@@ -532,7 +547,7 @@
     });
     const lc = makeLoadCase('Load case 1');
     return { title: String(obj.title || 'Imported truss').slice(0, 120), nodes, members, materials, groups, loadCases: [lc], activeCase: lc,
-      combinations: [], activeCombination: null };
+      combinations: [], activeCombination: null, design: { deflection: null } };
   }
 
   /**
@@ -654,6 +669,51 @@
     const a = list.findIndex((c) => c.id === active);
     if (a >= 0) model.activeCombination = model.combinations[a];
     else notes.push({ msg: `The file names combination ${JSON.stringify(active).slice(0, 40)} as active, which does not exist, so "${model.activeCase.name}" is shown.` });
+  }
+  /**
+   * The design data (milestone 10, optional in version 2): the reference-chord deflection criterion. It is
+   * design input, not structure, so a malformed criterion never rejects the file: it is left out with a note.
+   */
+  function readDesignV2(obj, model, notes) {
+    model.design = { deflection: null };
+    const d = obj.design;
+    if (d === undefined || d === null) return;
+    if (typeof d !== 'object' || Array.isArray(d)) { notes.push({ msg: 'The design data is not an object, so it was not read.' }); return; }
+    const c = d.deflection;
+    if (c === undefined || c === null) return;
+    const node = (v) => (Number.isInteger(v) && v >= 1 && v <= model.nodes.length ? model.nodes[v - 1] : null);
+    if (typeof c !== 'object') { notes.push({ msg: 'The deflection criterion is not an object, so it was not applied.' }); return; }
+    const a = node(c.chordA), b = node(c.chordB);
+    if (!a || !b || a === b) { notes.push({ msg: `The deflection criterion names reference nodes ${JSON.stringify(c.chordA)} and ${JSON.stringify(c.chordB)}, which are not two different nodes of this model, so it was not applied.` }); return; }
+    const limit = c.limit && typeof c.limit === 'object' ? { type: c.limit.type, value: typeof c.limit.value === 'string' && c.limit.value.trim() !== '' ? +c.limit.value : c.limit.value } : null;
+    if (!validLimit(limit)) { notes.push({ msg: `The deflection limit ${JSON.stringify(c.limit).slice(0, 60)} is not a positive ratio or length, so the criterion was not applied.` }); return; }
+    const nodes = [];
+    for (const v of Array.isArray(c.nodes) ? c.nodes : []) {
+      const n = node(v);
+      if (!n) notes.push({ msg: `The deflection criterion names node ${JSON.stringify(v).slice(0, 20)}, which does not exist, so it was skipped.` });
+      else if (!nodes.includes(n)) nodes.push(n);
+    }
+    if (!Array.isArray(c.nodes)) notes.push({ msg: 'The deflection criterion has no list of nodes to check.' });
+    model.design.deflection = { a, b, nodes, limit };
+  }
+  /** Sets (or with null clears) the deflection criterion. Returns false, changing nothing, for invalid input. */
+  function setDeflectionCriterion(model, crit) {
+    if (!model.design) model.design = { deflection: null };
+    if (crit === null) { model.design.deflection = null; return true; }
+    if (!crit || !model.nodes.includes(crit.a) || !model.nodes.includes(crit.b) || crit.a === crit.b || !validLimit(crit.limit)) return false;
+    const nodes = (crit.nodes || []).filter((n, i, arr) => model.nodes.includes(n) && arr.indexOf(n) === i);
+    model.design.deflection = { a: crit.a, b: crit.b, nodes, limit: { type: crit.limit.type, value: crit.limit.value } };
+    return true;
+  }
+  /** After nodes are deleted: drops them from the criterion; returns what changed ('', 'nodes' or 'criterion'). */
+  function pruneDesign(model) {
+    const c = model.design && model.design.deflection;
+    if (!c) return '';
+    if (!model.nodes.includes(c.a) || !model.nodes.includes(c.b)) { model.design.deflection = null; return 'criterion'; }
+    const keep = c.nodes.filter((n) => model.nodes.includes(n));
+    if (keep.length === c.nodes.length) return '';
+    c.nodes = keep;
+    return 'nodes';
   }
   const entryNum = (v) => (v === undefined ? 0 : v === null || v === '' ? NaN : +v);
   function readEntries(list, a, b, into, model, notes, where) {
@@ -1079,6 +1139,8 @@
     // load combinations (milestone 5): F = Σ γᵢ·Fᵢ, u_s = Σ γᵢ·u_s,ᵢ, each combination solved directly
     isCombination, makeCombination, addCombination, removeCombination, setActiveCombination, combinationFactor, setCombinationFactor,
     combinationLoads, combinationSettlements, caseSettlements, activeTarget, analyzeCombination, analyzeCombinations, combinationEnvelope,
+    // design data (milestone 10): the reference-chord deflection criterion, optional in file format version 2
+    setDeflectionCriterion, pruneDesign,
     // file format version 2 (reads version 1 too) and model checks
     FORMAT_VERSION, serialize, readModel, deserialize, validateModel,
     // example structures

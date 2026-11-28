@@ -1,5 +1,7 @@
 # Three design directions (milestone 6, step 2)
 
+> **Status:** a proposal from milestone 6, step 2, kept as the record of the reasoning. The maintainer chose a different, dark direction, **Midnight Engineering Lab**, which is implemented; its token system is `tokens.md`. The common requirements listed below (one control for what is analysed, one source per colour, no ALL CAPS or middle-dot labels, visible focus, a phone decision) were all carried into it.
+
 Each direction answers the audit (`ui-audit.md`) differently: in how the workspace is organised, not just in colour. All three keep one model, one engine (`FEA.analyze`), every feature, the shortcuts, the `file://` constraint and the smoke-test contract ids. The token plans follow the `frontend-design` format: colour, type, layout and principles. `tokens.md` develops the full token system for the recommended direction.
 
 Common to all three, because the audit requires it whichever direction is chosen:

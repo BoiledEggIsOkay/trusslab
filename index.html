@@ -2,243 +2,284 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TrussLab · 2D Truss FEA &amp; Load Simulator</title>
-  <meta name="description" content="Interactive 2D truss finite element analysis: Direct Stiffness Method, exact LU solver, stability verification, stresses, buckling and reactions.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M3 25 L16 6 L29 25 Z M9.5 25 L16 15.5 L22.5 25' fill='none' stroke='%2338bdf8' stroke-width='2.5' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>TrussLab: learn, analyse and design 2D trusses</title>
+  <meta name="description" content="TrussLab: build a 2D pin-jointed truss, predict its behaviour, analyse it with the Direct Stiffness Method, see the equations behind every result, and size its members.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M3 25 L16 6 L29 25 Z M9.5 25 L16 15.5 L22.5 25' fill='none' stroke='%2358C7E8' stroke-width='2.5' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div id="app">
+<a class="skip-link" href="#canvas">Skip to the structure</a>
+<div id="app" class="ws-analyze mode-guided">
 
-  <!-- ============================== TOP BAR ============================== -->
-  <header class="topbar">
+  <!-- ============================== HEADER ============================== -->
+  <header class="appbar">
     <div class="brand">
       <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
         <path d="M3 25 L16 6 L29 25 Z M9.5 25 L16 15.5 L22.5 25" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
         <circle cx="3" cy="25" r="2.2"/><circle cx="29" cy="25" r="2.2"/><circle cx="16" cy="6" r="2.2"/>
       </svg>
-      <div class="brand-text"><strong>TrussLab</strong><span>2D Truss FEA &amp; Load Simulator</span></div>
+      <span class="brand-name">TrussLab</span>
     </div>
-
-    <div class="tb-group">
-      <button class="btn" id="btnNew" title="Start a new empty model">New</button>
-      <button class="btn" id="btnOpen" title="Open a model or report JSON file (Ctrl+O)">Open…</button>
-      <button class="btn" id="btnSave" title="Save the model as JSON (Ctrl+S)">Save</button>
-      <input type="file" id="fileInput" accept=".json,application/json" hidden>
-    </div>
-    <div class="tb-group">
-      <select id="selExample" class="select" title="Load a pre-built example structure">
-        <option value="">Examples…</option>
-      </select>
-    </div>
-    <div class="tb-group">
-      <button class="btn icon" id="btnUndo" title="Undo (Ctrl+Z)" aria-label="Undo">&#x21B6;</button>
-      <button class="btn icon" id="btnRedo" title="Redo (Ctrl+Y / Ctrl+Shift+Z)" aria-label="Redo">&#x21B7;</button>
-    </div>
-    <div class="tb-group">
-      <button class="btn primary" id="btnSolve" title="Run the analysis (Enter)">&#9654; Solve</button>
-      <label class="switch" title="Re-solve automatically after every edit">
-        <input type="checkbox" id="chkLive" checked><span class="track"></span><span>Live</span>
-      </label>
-    </div>
-
-    <div id="statusPill" class="pill" role="status">Ready</div>
-
+    <nav class="ws-nav" role="tablist" aria-label="Workspaces">
+      <button role="tab" id="wsLearn" data-ws="learn" aria-selected="false" aria-controls="leftPanel" title="Lessons, predictions, free-body diagrams and the Solver Explorer">Learn</button>
+      <button role="tab" id="wsAnalyze" data-ws="analyze" aria-selected="true" aria-controls="leftPanel" title="Build the truss, load it and read the results">Analyze</button>
+      <button role="tab" id="wsDesign" data-ws="design" aria-selected="false" aria-controls="leftPanel" title="Materials, sections, checks, deflection and section sizing">Design</button>
+    </nav>
     <div class="tb-group right">
+      <div class="seg mode-toggle" role="group" aria-label="Presentation">
+        <button type="button" id="btnGuided" data-uimode="guided" aria-pressed="true" title="Explanations and worked calculations open next to the results">Guided</button>
+        <button type="button" id="btnTechnical" data-uimode="technical" aria-pressed="false" title="Dense numbers, matrices and diagnostics; explanations stay closed until you open them">Technical</button>
+      </div>
       <div class="menu-wrap">
-        <button class="btn" id="btnExport" aria-haspopup="true" aria-expanded="false">Export &#9662;</button>
+        <button class="btn quiet" id="btnFile" aria-haspopup="true" aria-expanded="false" aria-controls="fileMenu">File &#9662;</button>
+        <div class="menu" id="fileMenu" hidden>
+          <button type="button" id="btnNew">New empty model</button>
+          <button type="button" id="btnOpen">Open a file… <kbd>Ctrl O</kbd></button>
+          <button type="button" id="btnSave">Save the model file <kbd>Ctrl S</kbd></button>
+          <div class="menu-sep"></div>
+          <div class="menu-h"><label for="selExample">Open an example</label></div>
+          <select id="selExample" class="select">
+            <option value="">Choose an example…</option>
+          </select>
+        </div>
+        <input type="file" id="fileInput" accept=".json,application/json" hidden>
+      </div>
+      <div class="menu-wrap">
+        <button class="btn quiet" id="btnExport" aria-haspopup="true" aria-expanded="false" aria-controls="exportMenu">Export &#9662;</button>
         <div class="menu" id="exportMenu" hidden>
           <div class="menu-h">Calculation report</div>
-          <button data-export="report-csv">Report: CSV</button>
-          <button data-export="report-json">Report: JSON</button>
-          <div class="menu-h">System matrices</div>
-          <button data-export="matrices-csv">[K], [Kff], {F}, {u}, {R}: CSV</button>
-          <button data-export="matrices-json">[K], [Kff], {F}, {u}, {R}: JSON</button>
+          <button type="button" data-export="report-csv">Report as CSV</button>
+          <button type="button" data-export="report-json">Report as JSON</button>
+          <div class="menu-h">System matrices [K], [K<sub>ff</sub>], {F}, {u}, {R}</div>
+          <button type="button" data-export="matrices-csv">Matrices as CSV</button>
+          <button type="button" data-export="matrices-json">Matrices as JSON</button>
           <div class="menu-h">Other</div>
-          <button data-export="png">Canvas image: PNG</button>
-          <button data-export="model">Model file: JSON</button>
+          <button type="button" data-export="png">Picture of the canvas (PNG)</button>
+          <button type="button" data-export="model">Model file (JSON)</button>
         </div>
       </div>
-      <button class="btn icon" id="btnPanels" title="Show / hide side panels (narrow windows: left, then right, then none)" aria-label="Toggle panels">&#9707;</button>
-      <button class="btn icon" id="btnHelp" title="Help, conventions &amp; method (?)" aria-label="Help">?</button>
+      <button class="btn icon quiet" id="btnPanels" title="Show or hide the side panels (on narrow screens: left, then right, then none)" aria-label="Show or hide the side panels">
+        <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7.5 3.5v13M12.5 3.5v13" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+      <button class="btn icon quiet" id="btnHelp" title="Help, conventions and method (?)" aria-label="Help">?</button>
     </div>
   </header>
+  <p class="phone-note" id="phoneNote">This is the view-only layout for phones: open models, inspect members and nodes, read results and lessons. To build or edit a truss, use a tablet or a computer.</p>
 
-  <!-- ============================== LEFT PANEL ============================== -->
-  <aside class="panel left" id="leftPanel">
-    <details class="sec" open>
-      <summary>Materials</summary>
-      <div class="sec-body">
-        <div id="materialsList" class="list"></div>
-        <div class="row">
-          <select id="selAddMaterial" class="select grow">
-            <option value="steel">Structural Steel (E 200 GPa, σy 250 MPa, ρ 7850 kg/m³)</option>
-            <option value="aluminum">6061-T6 Aluminum (E 68.9 GPa, σy 276 MPa, ρ 2700 kg/m³)</option>
-            <option value="fir">Douglas Fir Timber (E 11 GPa, ρ ≈ 540 kg/m³ at 12 % moisture content)</option>
-            <option value="custom">Custom material (no density until you enter one)</option>
-          </select>
-          <button class="btn sm" id="btnAddMaterial">+ Add</button>
-        </div>
-      </div>
-    </details>
+  <!-- ============================== WORKSPACE PANEL (left) ============================== -->
+  <aside class="panel left" id="leftPanel" aria-label="Workspace">
+    <!-- Learn: filled by script.js (section 18) -->
+    <div class="ws-pane" id="paneLearn" data-pane="learn" hidden></div>
 
-    <details class="sec" open>
-      <summary>Sections · member groups</summary>
-      <div class="sec-body">
-        <p class="note">The radio button sets the group used for new members. Click a group to edit it.</p>
-        <div id="groupsList" class="list"></div>
-        <div id="groupEditor"></div>
-        <button class="btn sm" id="btnAddGroup">+ New section group</button>
-      </div>
-    </details>
+    <!-- Analyze -->
+    <div class="ws-pane" id="paneAnalyze" data-pane="analyze">
+      <div class="panel-head"><h2>Model</h2><p id="modelSub"></p></div>
+      <fieldset class="edit" id="editAnalyze">
+      <details class="sec" open>
+        <summary>Load cases and combinations</summary>
+        <div class="sec-body">
+          <p class="note">Loads and support settlements belong to a load case. The case or combination chosen above the canvas is the one analysed; a combination adds up factored load cases and is solved as one action state.</p>
+          <div class="field-label"><label for="txtCaseName">Name of the case or combination shown</label></div>
+          <div class="row">
+            <input type="text" id="txtCaseName" class="txt grow" maxlength="80">
+            <button class="btn sm danger" id="btnDeleteCase" title="Delete the load case shown (Ctrl+Z undoes it)">Delete</button>
+          </div>
+          <div class="btn-row">
+            <button class="btn sm" id="btnAddCase" title="Add an empty load case and show it">+ Load case</button>
+            <button class="btn sm" id="btnAddSelfWeight" title="Add the generated self-weight case: each member's weight W = ρ·A·L·g, half at each end node">+ Self-weight case</button>
+            <button class="btn sm" id="btnAddCombination" title="Add a load combination: factors γ on load cases, analysed as one complete action state">+ Combination</button>
+          </div>
+          <p class="note" id="selfWeightNote" hidden>Generated: each member weighs W = ρ·A·L·g (density × section area × length × 9.80665 m/s²), and half of it acts downward at each end node. Recalculated whenever the geometry, a section or a material changes; loads cannot be entered here.</p>
+          <div id="comboEditor" hidden></div>
+        </div>
+      </details>
+      </fieldset>
+      <details class="sec" open>
+        <summary>Analysis</summary>
+        <div class="sec-body">
+          <div class="field-label"><label for="rngLoadFactor">Load factor λ</label></div>
+          <div class="row">
+            <input type="range" id="rngLoadFactor" min="0" max="3" step="0.01" value="1" class="grow" aria-describedby="lfNote">
+            <span class="mono" id="lfEcho" aria-hidden="true"></span>
+          </div>
+          <p class="note" id="lfNote">λ multiplies every action of what is analysed, once: nodal loads and prescribed settlements alike (a combination after its factors γ). The model is linear, so displacements, forces and reactions scale by λ too. λ = 0 means no actions; a mechanism stays unstable at any λ.</p>
+          <div class="row">
+            <label class="grow" for="numTargetSF">Target safety factor</label>
+            <input type="text" id="numTargetSF" class="num w5" value="1.5">
+          </div>
+          <p class="note">A safe member whose governing safety factor is below the target is flagged (!), not failed.</p>
+          <details class="explain">
+            <summary>Assumptions of the analysis</summary>
+            <div><p>2D, linear-elastic, small-displacement analysis of a pin-jointed truss by the Direct Stiffness Method. Members carry axial force only; loads act at nodes. Buckling uses Euler's P<sub>cr</sub> = π²EI/L² for an ideal pin-ended member (K = 1) with the weak-axis I of its section. This is an educational analysis, not a code-compliant design.</p></div>
+          </details>
+        </div>
+      </details>
+    </div>
 
-    <details class="sec" open>
-      <summary>Grid &amp; snapping</summary>
-      <div class="sec-body">
-        <div class="field-label">Snap step</div>
-        <div class="seg" id="segGrid">
-          <button data-grid="0.1">0.1 m</button>
-          <button data-grid="0.25">0.25 m</button>
-          <button data-grid="0.5">0.5 m</button>
-          <button data-grid="1">1.0 m</button>
-          <button data-grid="2">2.0 m</button>
+    <!-- Design -->
+    <div class="ws-pane" id="paneDesign" data-pane="design" hidden>
+      <div class="panel-head"><h2>Design</h2><p id="designSub"></p></div>
+      <fieldset class="edit" id="editDesign">
+      <details class="sec" open>
+        <summary>Materials</summary>
+        <div class="sec-body">
+          <div id="materialsList" class="list"></div>
+          <div class="row">
+            <select id="selAddMaterial" class="select grow" aria-label="Material to add">
+              <option value="steel">Structural steel (E 200 GPa, σy 250 MPa, ρ 7850 kg/m³)</option>
+              <option value="aluminum">6061-T6 aluminium (E 68.9 GPa, σy 276 MPa, ρ 2700 kg/m³)</option>
+              <option value="fir">Douglas fir timber (E 11 GPa, ρ ≈ 540 kg/m³ at 12 % moisture content)</option>
+              <option value="custom">Custom material (no density until you enter one)</option>
+            </select>
+            <button class="btn sm" id="btnAddMaterial">+ Add</button>
+          </div>
         </div>
-        <label class="chk"><input type="checkbox" id="chkSnap" checked> Snap to grid <kbd>G</kbd></label>
-        <label class="chk"><input type="checkbox" id="chkSnapNodes" checked> Snap to existing nodes</label>
-        <label class="chk"><input type="checkbox" id="chkGrid" checked> Show grid</label>
-      </div>
-    </details>
-
-    <details class="sec" open>
-      <summary>Analysis</summary>
-      <div class="sec-body">
-        <div class="field-label">Load case or combination <span class="hint-i" title="Nodal loads and support settlements belong to a load case. The active case is the one you edit and analyse. A combination, listed under Combinations, analyses the factored sum of load cases as one action state; its loads are not edited directly.">i</span></div>
-        <div class="row">
-          <select id="selLoadCase" class="select grow" aria-label="Active load case or combination"></select>
-          <button class="btn sm" id="btnAddCase" title="Add an empty load case and make it active">+ New</button>
+      </details>
+      <details class="sec" open>
+        <summary>Sections</summary>
+        <div class="sec-body">
+          <p class="note">Each member belongs to a section group. The radio button chooses the group for new members; click a group to edit it.</p>
+          <div id="groupsList" class="list"></div>
+          <div id="groupEditor"></div>
+          <button class="btn sm" id="btnAddGroup">+ Section group</button>
         </div>
-        <div class="row">
-          <input type="text" id="txtCaseName" class="txt grow" aria-label="Name of the active load case or combination" maxlength="80">
-          <button class="btn sm danger" id="btnDeleteCase" title="Delete the active load case (Ctrl+Z undoes it)">Delete</button>
-        </div>
-        <div class="row">
-          <button class="btn sm" id="btnAddSelfWeight" title="Add the generated self-weight case: each member’s weight W = ρ·A·L·g, half at each end node">+ Self-weight case</button>
-          <button class="btn sm" id="btnAddCombination" title="Add a load combination: factors γ on load cases, analysed as one complete action state">+ Combination</button>
-        </div>
-        <p class="note" id="selfWeightNote" hidden>Generated: each member weighs W = ρ·A·L·g (density × section area × length × 9.80665 m/s²), and half of it acts downward at each end node. Recalculated whenever the geometry, a section or a material changes; loads cannot be entered here.</p>
-        <div id="comboEditor" hidden></div>
-        <div class="field-label">Load factor λ <span class="hint-i" title="λ multiplies every action in the active load case or combination (a combination after its factors γ, once): nodal loads and prescribed support settlements alike. λ = 0 means no actions, so a stable structure has no displacements, member forces or reactions. A mechanism stays unstable at any λ.">i</span></div>
-        <div class="row">
-          <input type="range" id="rngLoadFactor" min="0" max="3" step="0.01" value="1" class="grow">
-          <input type="text" id="numLoadFactor" class="num w5" value="1">
-        </div>
-        <div class="row">
-          <label class="field-label grow" for="numTargetSF">Target safety factor <span class="hint-i" title="Members whose governing safety factor is below this value are flagged amber (they have not failed).">i</span></label>
-          <input type="text" id="numTargetSF" class="num w5" value="1.5">
-        </div>
-        <p class="note">Linear-elastic, small-displacement analysis. Buckling uses Euler P<sub>cr</sub> = π²EI/L² (pin-ended, K = 1) with the I entered for the group, so use the weak-axis value.</p>
-      </div>
-    </details>
-
-    <details class="sec" open>
-      <summary>Display</summary>
-      <div class="sec-body">
-        <div class="field-label">Deflection scale</div>
-        <div class="row">
-          <input type="range" id="rngScale" min="0" max="3" step="0.001" value="2" class="grow" title="Logarithmic: 1× to 1000×">
-          <input type="text" id="numScale" class="num w5" value="100">
-          <button class="btn sm toggle" id="btnAutoScale" title="Choose the scale automatically after each solve">Auto</button>
-        </div>
-        <div class="field-label">Colour members by</div>
-        <div class="seg" id="segColor">
-          <button data-color="force">Force</button>
-          <button data-color="stress">Stress</button>
-          <button data-color="util">Utilisation</button>
-        </div>
-        <div class="chk-grid">
-          <label class="chk"><input type="checkbox" data-show="showUndeformed"> Undeformed</label>
-          <label class="chk"><input type="checkbox" data-show="showDeformed"> Deformed <kbd>D</kbd></label>
-          <label class="chk"><input type="checkbox" data-show="showLoads"> Loads</label>
-          <label class="chk"><input type="checkbox" data-show="showReactions"> Reactions</label>
-          <label class="chk"><input type="checkbox" data-show="showSupports"> Supports</label>
-          <label class="chk"><input type="checkbox" data-show="showNodeLabels"> Node IDs</label>
-          <label class="chk"><input type="checkbox" data-show="showMemberLabels"> Member IDs</label>
-          <label class="chk"><input type="checkbox" data-show="showForceLabels"> Force values</label>
-          <label class="chk"><input type="checkbox" data-show="animate"> Animate solve</label>
-        </div>
-        <div class="units-grid">
-          <label>Force <select id="selForceUnit" class="select"><option>N</option><option>kN</option><option>MN</option></select></label>
-          <label>Displ. <select id="selDispUnit" class="select"><option>µm</option><option>mm</option><option>m</option></select></label>
-          <label>Digits <select id="selDigits" class="select"><option>3</option><option>4</option><option>5</option><option>6</option><option>8</option></select></label>
-        </div>
-      </div>
-    </details>
+      </details>
+      </fieldset>
+      <div id="designTools"></div>
+    </div>
   </aside>
 
-  <!-- ============================== CENTER ============================== -->
-  <main class="center">
-    <div class="toolstrip">
-      <div class="tools" id="tools" role="toolbar" aria-label="Drawing tools">
-        <button class="tool" data-tool="select" title="Select &amp; move (V)">
-          <svg viewBox="0 0 20 20"><path d="M4 2 L4 16 L8 12 L11 18 L13 17 L10 11 L15 11 Z"/></svg><span>Select</span><kbd>V</kbd></button>
-        <button class="tool" data-tool="node" title="Add nodes (N)">
-          <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="4"/><path d="M10 1v4M10 15v4M1 10h4M15 10h4" class="stroke"/></svg><span>Node</span><kbd>N</kbd></button>
-        <button class="tool" data-tool="member" title="Draw members between nodes (M)">
-          <svg viewBox="0 0 20 20"><path d="M3 16 L17 4" class="stroke thick"/><circle cx="3" cy="16" r="2.5"/><circle cx="17" cy="4" r="2.5"/></svg><span>Member</span><kbd>M</kbd></button>
-        <button class="tool" data-tool="support" title="Apply supports (S)">
-          <svg viewBox="0 0 20 20"><path d="M10 4 L4 13 H16 Z" class="stroke"/><path d="M2 16 H18 M4 16 L2 19 M8 16 L6 19 M12 16 L10 19 M16 16 L14 19" class="stroke"/></svg><span>Support</span><kbd>S</kbd></button>
-        <button class="tool" data-tool="load" title="Apply nodal loads (L)">
-          <svg viewBox="0 0 20 20"><path d="M10 1 V13" class="stroke thick"/><path d="M5 9 L10 16 L15 9 Z"/><path d="M3 19 H17" class="stroke"/></svg><span>Load</span><kbd>L</kbd></button>
-        <button class="tool" data-tool="pan" title="Pan the view (H). Middle/right-drag pans in any tool">
-          <svg viewBox="0 0 20 20"><path d="M10 1 L13 4 H11 V9 H16 V7 L19 10 L16 13 V11 H11 V16 H13 L10 19 L7 16 H9 V11 H4 V13 L1 10 L4 7 V9 H9 V4 H7 Z"/></svg><span>Pan</span><kbd>H</kbd></button>
+  <!-- ============================== CENTRE ============================== -->
+  <main class="center" id="center">
+    <div class="contextbar" role="toolbar" aria-label="What is analysed, and the view">
+      <div class="analysed">
+        <span id="analysedLabel">Analysed</span>
+        <select id="selLoadCase" class="select" aria-label="Load case or combination analysed"></select>
       </div>
-      <div class="tool-options" id="toolOptions"></div>
+      <label class="lf" title="Load factor λ: multiplies every action of what is analysed">λ <input type="text" id="numLoadFactor" class="num w4" value="1" aria-label="Load factor λ"></label>
+      <span class="vsep"></span>
+      <label class="switch live-ctl" title="Re-solve automatically after every edit">
+        <input type="checkbox" id="chkLive" checked><span class="track"></span><span>Live</span>
+      </label>
+      <button class="btn sm" id="btnSolve" title="Run the analysis now (Enter)">Solve</button>
+      <div id="statusPill" class="pill" role="status">Ready</div>
       <div class="view-ctrls">
-        <button class="btn icon sm" id="btnZoomOut" title="Zoom out" aria-label="Zoom out">&minus;</button>
-        <span id="zoomLabel" class="mono dim">—</span>
-        <button class="btn icon sm" id="btnZoomIn" title="Zoom in" aria-label="Zoom in">+</button>
-        <button class="btn sm" id="btnFit" title="Fit model to view (F)">Fit</button>
+        <div class="menu-wrap">
+          <button class="btn sm" id="btnView" aria-haspopup="true" aria-expanded="false" aria-controls="viewMenu">View &#9662;</button>
+          <div class="menu popover" id="viewMenu" hidden>
+            <h3>Deflected shape</h3>
+            <div class="row">
+              <input type="range" id="rngScale" min="0" max="3" step="0.001" value="2" class="grow" title="Logarithmic: 1× to 1000×" aria-label="Deflection scale">
+              <input type="text" id="numScale" class="num w5" value="100" aria-label="Deflection scale factor">
+              <button class="btn sm toggle" id="btnAutoScale" title="Choose the scale automatically after each solve">Auto</button>
+            </div>
+            <h3>Colour members by</h3>
+            <div class="seg" id="segColor" role="group" aria-label="Colour members by">
+              <button data-color="force">Force</button>
+              <button data-color="stress">Stress</button>
+              <button data-color="util">Utilisation</button>
+            </div>
+            <h3>Show</h3>
+            <div class="chk-grid">
+              <label class="chk"><input type="checkbox" data-show="showDeformed"> Deformed <kbd>D</kbd></label>
+              <label class="chk"><input type="checkbox" data-show="showUndeformed"> Undeformed</label>
+              <label class="chk"><input type="checkbox" data-show="showLoads"> Loads</label>
+              <label class="chk"><input type="checkbox" data-show="showReactions"> Reactions</label>
+              <label class="chk"><input type="checkbox" data-show="showSupports"> Supports</label>
+              <label class="chk"><input type="checkbox" data-show="showNodeLabels"> Node numbers</label>
+              <label class="chk"><input type="checkbox" data-show="showMemberLabels"> Member numbers</label>
+              <label class="chk"><input type="checkbox" data-show="showForceLabels"> Force values</label>
+              <label class="chk"><input type="checkbox" data-show="animate"> Animate solve</label>
+            </div>
+            <h3>Grid and snapping</h3>
+            <div class="seg" id="segGrid" role="group" aria-label="Snap step">
+              <button data-grid="0.1">0.1 m</button>
+              <button data-grid="0.25">0.25 m</button>
+              <button data-grid="0.5">0.5 m</button>
+              <button data-grid="1">1 m</button>
+              <button data-grid="2">2 m</button>
+            </div>
+            <div class="chk-grid">
+              <label class="chk"><input type="checkbox" id="chkSnap" checked> Snap to grid <kbd>G</kbd></label>
+              <label class="chk"><input type="checkbox" id="chkSnapNodes" checked> Snap to nodes</label>
+              <label class="chk"><input type="checkbox" id="chkGrid" checked> Show grid</label>
+            </div>
+            <h3>Units</h3>
+            <div class="units-grid">
+              <label>Force <select id="selForceUnit" class="select"><option>N</option><option>kN</option><option>MN</option></select></label>
+              <label>Displacement <select id="selDispUnit" class="select"><option>µm</option><option>mm</option><option>m</option></select></label>
+              <label>Digits <select id="selDigits" class="select"><option>3</option><option>4</option><option>5</option><option>6</option><option>8</option></select></label>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div class="update-notice" id="updateNotice" role="status" hidden>
-      <span>The load factor λ now scales nodal loads and prescribed support settlements alike. At λ = 0 there are no actions: a stable structure has no displacements, member forces or reactions, and a mechanism stays unstable.</span>
-      <button class="btn sm" id="btnDismissNotice">Got it</button>
+    <div class="workarea">
+      <nav class="rail" aria-label="Drawing tools">
+        <div class="tools" id="tools" role="toolbar" aria-orientation="vertical" aria-label="Drawing tools">
+          <button class="tool" data-tool="select" title="Select and move (V)" aria-label="Select and move (V)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 2 L4 16 L8 12 L11 18 L13 17 L10 11 L15 11 Z"/></svg><span>Select</span><kbd>V</kbd></button>
+          <button class="tool" data-tool="node" title="Add nodes (N)" aria-label="Add nodes (N)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4"/><path d="M10 1v4M10 15v4M1 10h4M15 10h4" class="stroke"/></svg><span>Node</span><kbd>N</kbd></button>
+          <button class="tool" data-tool="member" title="Draw members between nodes (M)" aria-label="Draw members (M)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16 L17 4" class="stroke thick"/><circle cx="3" cy="16" r="2.5"/><circle cx="17" cy="4" r="2.5"/></svg><span>Member</span><kbd>M</kbd></button>
+          <button class="tool" data-tool="support" title="Apply supports (S)" aria-label="Apply supports (S)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4 L4 13 H16 Z" class="stroke"/><path d="M2 16 H18 M4 16 L2 19 M8 16 L6 19 M12 16 L10 19 M16 16 L14 19" class="stroke"/></svg><span>Support</span><kbd>S</kbd></button>
+          <button class="tool" data-tool="load" title="Apply nodal loads (L)" aria-label="Apply nodal loads (L)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 1 V13" class="stroke thick"/><path d="M5 9 L10 16 L15 9 Z"/><path d="M3 19 H17" class="stroke"/></svg><span>Load</span><kbd>L</kbd></button>
+          <button class="tool" data-tool="pan" title="Pan the view (H). Middle or right drag pans with any tool" aria-label="Pan the view (H)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 1 L13 4 H11 V9 H16 V7 L19 10 L16 13 V11 H11 V16 H13 L10 19 L7 16 H9 V11 H4 V13 L1 10 L4 7 V9 H9 V4 H7 Z"/></svg><span>Pan</span><kbd>H</kbd></button>
+        </div>
+        <div class="rail-sep"></div>
+        <button class="btn icon" id="btnUndo" title="Undo (Ctrl+Z)" aria-label="Undo">&#x21B6;</button>
+        <button class="btn icon" id="btnRedo" title="Redo (Ctrl+Y or Ctrl+Shift+Z)" aria-label="Redo">&#x21B7;</button>
+      </nav>
+      <div class="viewport" id="viewport">
+        <canvas id="canvas" tabindex="0" aria-label="The truss: select a node or member to inspect it. Shortcuts: V select, N nodes, M members, S supports, L loads, F fit, D deformed shape"></canvas>
+        <div class="tool-options" id="toolOptions" aria-label="Options of the active tool"></div>
+        <div class="update-notice" id="updateNotice" role="status" hidden>
+          <span>The load factor λ now scales nodal loads and prescribed support settlements alike. At λ = 0 there are no actions: a stable structure has no displacements, member forces or reactions, and a mechanism stays unstable.</span>
+          <button class="btn sm" id="btnDismissNotice">Got it</button>
+        </div>
+        <div class="banner" id="banner" hidden></div>
+        <div class="legend" id="legend" hidden></div>
+        <div class="hud" id="hud"></div>
+        <div class="tooltip" id="tooltip" hidden></div>
+        <div class="zoom-ctrls" role="group" aria-label="Zoom">
+          <button class="btn icon sm" id="btnZoomOut" title="Zoom out" aria-label="Zoom out">&minus;</button>
+          <span id="zoomLabel" class="mono" title="Drawing scale">—</span>
+          <button class="btn icon sm" id="btnZoomIn" title="Zoom in" aria-label="Zoom in">+</button>
+          <button class="btn sm" id="btnFit" title="Fit the model to the view (F)">Fit</button>
+        </div>
+      </div>
     </div>
 
-    <div class="viewport" id="viewport">
-      <canvas id="canvas" aria-label="Truss model canvas"></canvas>
-      <div class="banner" id="banner" hidden></div>
-      <div class="legend" id="legend" hidden></div>
-      <div class="hud" id="hud"></div>
-      <div class="tooltip" id="tooltip" hidden></div>
-    </div>
-
-    <div class="splitter" id="splitter" title="Drag to resize the data panel"></div>
-
-    <section class="bottom" id="bottom">
-      <div class="tabs" role="tablist">
-        <button class="tab" data-tab="members" role="tab">Members</button>
-        <button class="tab" data-tab="nodes" role="tab">Nodes &amp; reactions</button>
-        <button class="tab" data-tab="matrix" role="tab">Stiffness matrix inspector</button>
-        <button class="tab" data-tab="log" role="tab">Solver log</button>
+    <div class="splitter" id="splitter" title="Drag to resize the data drawer"></div>
+    <section class="bottom" id="bottom" aria-label="Data tables">
+      <div class="tabs" role="tablist" aria-label="Data tables">
+        <button class="tab" data-tab="members" role="tab" aria-controls="tab-members">Members</button>
+        <button class="tab" data-tab="nodes" role="tab" aria-controls="tab-nodes">Nodes and reactions</button>
+        <button class="tab" data-tab="matrix" role="tab" aria-controls="tab-matrix">Matrices</button>
+        <button class="tab" data-tab="log" role="tab" aria-controls="tab-log">Solver log</button>
         <span class="spacer"></span>
         <span class="tab-info" id="tabInfo"></span>
-        <button class="btn icon sm" id="btnCollapseBottom" title="Collapse / expand the data panel" aria-label="Collapse panel">&#9662;</button>
+        <button class="btn icon sm quiet" id="btnCollapseBottom" title="Open or close the data drawer" aria-label="Open or close the data drawer">&#9662;</button>
       </div>
-      <div class="tab-body" id="tab-members"></div>
-      <div class="tab-body" id="tab-nodes" hidden></div>
-      <div class="tab-body" id="tab-matrix" hidden>
+      <div class="tab-body" id="tab-members" role="tabpanel"></div>
+      <div class="tab-body" id="tab-nodes" role="tabpanel" hidden></div>
+      <div class="tab-body" id="tab-matrix" role="tabpanel" hidden>
         <div class="mtx-ctrls">
-          <div class="seg" id="segMatrix">
+          <div class="seg" id="segMatrix" role="group" aria-label="Matrix">
             <button data-mtx="global" title="Assembled global stiffness matrix, 2n × 2n, global axes">Global [K]</button>
             <button data-mtx="transformed" title="Global matrix rotated into inclined support frames: K′ = Λ K Λᵀ">Rotated [K′]</button>
             <button data-mtx="reduced" title="Reduced (free-DOF) stiffness matrix with the solved system">Reduced [K<sub>ff</sub>]</button>
             <button data-mtx="element" title="Element stiffness matrix of the selected member, global axes">Element [kᵉ]</button>
           </div>
           <label>Units <select id="selMtxUnit" class="select"><option>N/m</option><option>kN/m</option><option>MN/m</option></select></label>
-          <div class="seg" id="segMtxMode">
+          <div class="seg" id="segMtxMode" role="group" aria-label="Matrix display">
             <button data-mode="table">Table</button>
             <button data-mode="heatmap">Heatmap</button>
           </div>
@@ -247,20 +288,19 @@
         </div>
         <div class="mtx-view" id="mtxView"></div>
       </div>
-      <div class="tab-body" id="tab-log" hidden><pre id="logText" class="log"></pre></div>
+      <div class="tab-body" id="tab-log" role="tabpanel" hidden><pre id="logText" class="log"></pre></div>
     </section>
   </main>
 
-  <!-- ============================== RIGHT PANEL ============================== -->
-  <aside class="panel right" id="rightPanel">
-    <section class="card">
-      <div class="card-h"><span>Inspector</span><span class="card-sub" id="inspectorSub"></span></div>
-      <div id="inspector" class="card-body"></div>
-    </section>
-    <section class="card">
-      <div class="card-h"><span>Critical health report</span></div>
-      <div id="health" class="card-body"></div>
-    </section>
+  <!-- ============================== INSPECTOR AND RESULTS (right) ============================== -->
+  <aside class="panel right" id="rightPanel" aria-label="Selection and results">
+    <div class="right-tabs" role="tablist" aria-label="Selection and results">
+      <button class="tab" role="tab" id="rtabInspector" data-rtab="inspector" aria-selected="true" aria-controls="paneInspector">Inspector</button>
+      <button class="tab" role="tab" id="rtabResults" data-rtab="results" aria-selected="false" aria-controls="paneResults">Results<span class="tab-status" id="resultsTabStatus"></span></button>
+      <span class="card-sub" id="inspectorSub"></span>
+    </div>
+    <div class="right-pane" id="paneInspector" role="tabpanel" aria-labelledby="rtabInspector"><div id="inspector" class="card-body"></div></div>
+    <div class="right-pane" id="paneResults" role="tabpanel" aria-labelledby="rtabResults" hidden><div id="health" class="card-body"></div></div>
   </aside>
 
   <!-- ============================== STATUS BAR ============================== -->
@@ -278,86 +318,101 @@
 <!-- ============================== HELP ============================== -->
 <div class="modal" id="helpModal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
-    <div class="modal-h"><h2 id="helpTitle">TrussLab: help, conventions &amp; method</h2><button class="btn icon" id="btnCloseHelp" aria-label="Close">&times;</button></div>
+    <div class="modal-h"><h2 id="helpTitle">Help, conventions and method</h2><button class="btn icon quiet" id="btnCloseHelp" aria-label="Close">&times;</button></div>
     <div class="modal-body">
+      <section>
+        <h3>Three workspaces, one model</h3>
+        <ul>
+          <li><b>Learn</b>: lessons, predicting tension and compression, free-body diagrams of a joint, the method of joints, and the Solver Explorer, which walks through the solver's own matrices.</li>
+          <li><b>Analyze</b>: build the truss, load it, choose the load case or combination, and read the results.</li>
+          <li><b>Design</b>: materials, sections, strength and buckling checks over the combinations, a deflection criterion, and section sizing.</li>
+        </ul>
+        <p>All three work on the same model and the same solver. <b>Guided</b> opens explanations and worked calculations next to the results; <b>Technical</b> keeps them closed and shows more numbers. Neither changes the model or the analysis.</p>
+        <p>On a phone, TrussLab is view-only: you can open models, inspect them and read results and lessons, but editing needs a tablet or a computer.</p>
+      </section>
       <section>
         <h3>Quick start</h3>
         <ol>
-          <li>Pick an example from <b>Examples…</b>, or press <kbd>N</kbd> and click to place nodes.</li>
-          <li>Press <kbd>M</kbd> and click node → node to draw members. Clicking empty space creates a node there. Members chain until you press <kbd>Esc</kbd> or right-click.</li>
-          <li>Press <kbd>S</kbd>, choose a support type in the tool bar, and click nodes. Press <kbd>L</kbd>, type F<sub>x</sub>, F<sub>y</sub>, and click nodes to load them.</li>
-          <li>With <b>Live</b> on, every edit is re-analysed immediately. Hover a member or node for its results.</li>
-          <li>Select an item (<kbd>V</kbd>) to edit exact values in the Inspector. Number fields accept expressions such as <code>2.5*sqrt(3)</code>, <code>12/7</code> or <code>10*cos(30)</code> (degrees).</li>
+          <li>Open an example from <b>File</b>, or press <kbd>N</kbd> and click to place nodes.</li>
+          <li>Press <kbd>M</kbd> and click node to node to draw members. Clicking empty space creates a node there. Members chain until you press <kbd>Esc</kbd> or right-click.</li>
+          <li>Press <kbd>S</kbd>, choose a support type, and click nodes. Press <kbd>L</kbd>, type F<sub>x</sub> and F<sub>y</sub>, and click nodes to load them.</li>
+          <li>With <b>Live</b> on, every edit is analysed at once. Hover a member or node for its results; select it to see the calculation.</li>
+          <li>Number fields accept expressions such as <code>2.5*sqrt(3)</code>, <code>12/7</code> or <code>10*cos(30)</code> (degrees).</li>
         </ol>
       </section>
       <section>
         <h3>Shortcuts</h3>
         <table class="kbd-table">
-          <tr><td><kbd>V</kbd> <kbd>N</kbd> <kbd>M</kbd> <kbd>S</kbd> <kbd>L</kbd> <kbd>H</kbd></td><td>Select, Node, Member, Support, Load, Pan tools</td></tr>
-          <tr><td><kbd>Enter</kbd></td><td>Solve (with animation)</td></tr>
-          <tr><td><kbd>Del</kbd> / <kbd>Backspace</kbd></td><td>Delete selection</td></tr>
-          <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd></td><td>Undo / redo</td></tr>
-          <tr><td><kbd>Ctrl</kbd>+<kbd>A</kbd></td><td>Select all</td></tr>
-          <tr><td>Arrow keys (<kbd>Shift</kbd> ×10)</td><td>Nudge selected nodes by one snap step</td></tr>
-          <tr><td><kbd>F</kbd> · <kbd>G</kbd> · <kbd>D</kbd></td><td>Fit view · toggle grid snap · toggle deformed shape</td></tr>
-          <tr><td>Wheel · middle/right drag · <kbd>Space</kbd>+drag</td><td>Zoom at cursor · pan</td></tr>
-          <tr><td><kbd>Shift</kbd>+click, drag on empty space</td><td>Add to selection, box selection</td></tr>
+          <tr><td><kbd>V</kbd> <kbd>N</kbd> <kbd>M</kbd> <kbd>S</kbd> <kbd>L</kbd> <kbd>H</kbd></td><td>Select, node, member, support, load and pan tools</td></tr>
+          <tr><td><kbd>Enter</kbd></td><td>Solve, with the animation</td></tr>
+          <tr><td><kbd>Del</kbd> or <kbd>Backspace</kbd></td><td>Delete the selection</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd>, <kbd>Ctrl</kbd>+<kbd>Y</kbd></td><td>Undo, redo</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>A</kbd></td><td>Select everything</td></tr>
+          <tr><td>Arrow keys, with <kbd>Shift</kbd> for ×10</td><td>Nudge the selected nodes by one snap step</td></tr>
+          <tr><td><kbd>F</kbd>, <kbd>G</kbd>, <kbd>D</kbd></td><td>Fit the view, grid snap on or off, deformed shape on or off</td></tr>
+          <tr><td>Wheel, middle or right drag, <kbd>Space</kbd> and drag; pinch on touch screens</td><td>Zoom at the pointer, pan</td></tr>
+          <tr><td><kbd>Shift</kbd> and click, drag on empty space</td><td>Add to the selection, box selection</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>End a member chain, clear the selection, close a menu or this dialog</td></tr>
         </table>
       </section>
       <section>
-        <h3>Units &amp; sign conventions</h3>
+        <h3>Units and sign conventions</h3>
         <ul>
-          <li>Global axes: x to the right, y upward, angles counter-clockwise from +x in degrees. Coordinates in metres.</li>
-          <li>Loads and reactions are positive in +x / +y. Gravity loads are therefore negative F<sub>y</sub>.</li>
-          <li>Axial force, stress and strain are positive in <b style="color:var(--tension)">tension</b> and negative in <b style="color:var(--compression)">compression</b>.</li>
-          <li>Inputs: E in GPa, σ<sub>y</sub> in MPa, A in mm², I in mm⁴. Force and displacement display units are selectable. All calculations and all exports use SI base units (m, N, Pa).</li>
+          <li>Global axes: x to the right, y upward, angles anticlockwise from +x in degrees. Coordinates in metres.</li>
+          <li>Loads and reactions are positive in +x and +y, so gravity loads are negative F<sub>y</sub>.</li>
+          <li>Axial force, stress and strain are positive in <b class="t-sign">tension</b> (+, T) and negative in <b class="c-sign">compression</b> (−, C). Zero-force members are drawn dashed.</li>
+          <li>Inputs: E in GPa, σ<sub>y</sub> in MPa, A in mm², I in mm⁴. Force and displacement units are set under <b>View</b>. All calculations and all exports use SI base units (m, N, Pa).</li>
         </ul>
       </section>
       <section>
         <h3>Supports</h3>
         <ul>
           <li><b>Pin</b>: u<sub>x</sub> = u<sub>y</sub> = 0.</li>
-          <li><b>Roller (u<sub>y</sub> = 0)</b>: rolls horizontally. <b>Roller (u<sub>x</sub> = 0)</b>: rolls vertically.</li>
+          <li><b>Roller (u<sub>y</sub> = 0)</b> rolls horizontally; <b>roller (u<sub>x</sub> = 0)</b> rolls vertically.</li>
           <li><b>Inclined roller</b>: rolls on a surface at angle α from +x; the displacement normal to the surface is zero and the reaction acts along that normal. It is handled exactly by rotating the nodal frame (K′ = Λ K Λᵀ), not by a penalty spring. Rotated DOFs are labelled x′, y′.</li>
           <li><b>Custom</b>: fix x′ and/or y′ of a frame rotated by α. A custom support with neither axis fixed restrains nothing, and TrussLab warns about it.</li>
           <li><b>Settlements</b>: any fixed axis of any support can settle, for example δ<sub>y′</sub> = −10 mm. A settlement is measured along the support's own axes x′, y′, belongs to a load case like the loads, and is scaled by λ. A settlement on an axis that is not fixed has no effect, and TrussLab warns about it.</li>
         </ul>
       </section>
       <section>
-        <h3>Method: Direct Stiffness Method</h3>
+        <h3>Method: the Direct Stiffness Method</h3>
         <ol>
           <li>For each member: L = hypot(Δx, Δy), c = Δx/L, s = Δy/L (no trigonometric round-off). The global-axis element matrix is
-            <div class="eq">[kᵉ] = (EA/L) ·
+            <div class="eq">[kᵉ] = (EA/L) ×
               <table class="mat"><tr><td>c²</td><td>cs</td><td>−c²</td><td>−cs</td></tr><tr><td>cs</td><td>s²</td><td>−cs</td><td>−s²</td></tr><tr><td>−c²</td><td>−cs</td><td>c²</td><td>cs</td></tr><tr><td>−cs</td><td>−s²</td><td>cs</td><td>s²</td></tr></table></div></li>
           <li>The 2n × 2n global [K] is assembled with Neumaier-compensated summation, so it is exactly symmetric.</li>
-          <li>DOFs are split into free (f) and restrained (s): K<sub>ff</sub> u<sub>f</sub> = λF<sub>f</sub> − K<sub>fs</sub>(λu<sub>s</sub>), where F<sub>f</sub> holds the nodal loads at the free DOFs, u<sub>s</sub> the prescribed settlements at the restrained DOFs, and λ is the load factor (see <b>Load cases and λ</b> below).</li>
-          <li><b>Stability verification before solving</b>: zero-stiffness DOFs are detected, K<sub>ff</sub> is Jacobi-equilibrated to K̃ = D<sup>−½</sup>K<sub>ff</sub>D<sup>−½</sup>, and a rank-revealing (pivoted) Cholesky factorisation tests positive definiteness. A rank deficiency means a mechanism. The solve is then refused and the mechanism mode shape is animated. The Maxwell count m + r − 2j, the determinant (log form, so it cannot overflow), and the 1-norm condition number κ₁ are reported.</li>
+          <li>DOFs are split into free (f) and restrained (s): K<sub>ff</sub> u<sub>f</sub> = λF<sub>f</sub> − K<sub>fs</sub>(λu<sub>s</sub>), where F<sub>f</sub> holds the nodal loads at the free DOFs, u<sub>s</sub> the prescribed settlements at the restrained DOFs, and λ is the load factor.</li>
+          <li><b>Stability is verified before solving</b>: zero-stiffness DOFs are detected, K<sub>ff</sub> is Jacobi-equilibrated to K̃ = D<sup>−½</sup>K<sub>ff</sub>D<sup>−½</sup>, and a rank-revealing (pivoted) Cholesky factorisation tests positive definiteness. A rank deficiency means a mechanism: the solve is refused and the mechanism mode shape is shown. The Maxwell count m + r − 2j, the determinant (in log form, so it cannot overflow), and the 1-norm condition number κ₁ are reported.</li>
           <li><b>Solver</b>: LU decomposition with partial pivoting, followed by iterative refinement whose residuals are computed with error-free transformations (Dot2) at about twice double precision.</li>
-          <li><b>Load cases and λ</b>: every action, nodal force or prescribed settlement, belongs to a load case, and the active case is analysed. The load factor λ multiplies all of its actions: {F} → λ{F} and {u<sub>s</sub>} → λ{u<sub>s</sub>}. The model is linear, so u(λ) = λ·u(1), and member forces and reactions scale the same way. At λ = 0 there are no actions: a stable structure has no displacements, member forces or reactions, while a mechanism stays unstable at any λ.</li>
-          <li><b>Self-weight</b> (the generated case, added with <i>+ Self-weight case</i>): each member weighs W = ρ·A·L·g, with ρ its material's density in kg/m³ (set under Materials; it is never guessed from a preset, and a material without one adds no weight: the case is then marked incomplete in the health report, the Inspector and on the canvas, and a warning names the material), A its section area, L its length and g = 9.80665 m/s². For a pin-ended member, the end reactions of its own uniform weight are W/2 at each end, so W/2 is applied downward (−y) at each end node: the truss stays axial-only, and the member's own bending under its weight is not modelled. The loads are never stored: they are computed from the current geometry, sections and materials, so they change with every edit, are scaled by λ like any load, and cannot be edited by hand. The case is solved on its own, like every other case.</li>
-          <li><b>Load combinations</b> (<i>+ Combination</i>): factors γ<sub>i</sub> on load cases, the self-weight case included. The combined actions F = Σ γ<sub>i</sub>F<sub>i</sub> and u<sub>s</sub> = Σ γ<sub>i</sub>u<sub>s,i</sub> are built first and the combination is solved directly as one action state, then λ multiplies it once: F → λΣγ<sub>i</sub>F<sub>i</sub>. Safety factors, utilisations and statuses are never added across load cases: they are not linear in the loads. With a combination shown, the health report lists every combination solved on its own and the governing value, the lowest safety factor among their own results.</li>
-          <li>Reactions: {R} = [K]{u} − λ{F}, where {u} holds λ{u<sub>s</sub>} at the restrained DOFs. Member force: F = (EA/L)[(u₂ − u₁)c + (v₂ − v₁)s]. σ = F/A, ε = ΔL/L.</li>
-          <li>Checks: SF<sub>yield</sub> = σ<sub>y</sub>/|σ|. For compression members SF<sub>buckling</sub> = P<sub>cr</sub>/|F| with P<sub>cr</sub> = π²EI/L². The governing SF is the smaller one. Status is Yielded or Buckled when SF &lt; 1.</li>
-          <li>Verification: global equilibrium ΣF<sub>x</sub>, ΣF<sub>y</sub>, ΣM, and nodal equilibrium rebuilt from the member forces, are reported in the health panel and the solver log.</li>
+          <li><b>Load cases and λ</b>: every action, nodal force or prescribed settlement, belongs to a load case. The load factor λ multiplies all actions of what is analysed: {F} → λ{F} and {u<sub>s</sub>} → λ{u<sub>s</sub>}. The model is linear, so u(λ) = λ·u(1), and member forces and reactions scale the same way. At λ = 0 there are no actions: a stable structure has no displacements, member forces or reactions, while a mechanism stays unstable at any λ.</li>
+          <li><b>Self-weight</b> (the generated case): each member weighs W = ρ·A·L·g, with ρ its material's density in kg/m³ (never guessed from a preset; a material without one adds no weight, and the case is then marked incomplete wherever it is shown), A its section area, L its length and g = 9.80665 m/s². For a pin-ended member the end reactions of its own uniform weight are W/2 at each end, so W/2 is applied downward at each end node: the truss stays axial-only, and the member's own bending under its weight is not modelled.</li>
+          <li><b>Load combinations</b>: factors γ<sub>i</sub> on load cases, the self-weight case included. The combined actions F = Σ γ<sub>i</sub>F<sub>i</sub> and u<sub>s</sub> = Σ γ<sub>i</sub>u<sub>s,i</sub> are built first and the combination is solved directly as one action state, then λ multiplies it once. Safety factors, utilisations and statuses are never added across load cases: they are not linear in the loads.</li>
+          <li>Reactions: {R} = [K]{u} − λ{F}, where {u} holds λ{u<sub>s</sub>} at the restrained DOFs. Member force: N = (EA/L)[(u₂ − u₁)c + (v₂ − v₁)s]. σ = N/A, ε = ΔL/L.</li>
+          <li>Checks: SF<sub>yield</sub> = σ<sub>y</sub>/|σ|. For compression members SF<sub>buckling</sub> = P<sub>cr</sub>/|N| with P<sub>cr</sub> = π²EI/L². The governing SF is the smaller one. Status is yielded or buckled when SF &lt; 1.</li>
+          <li>Verification: global equilibrium ΣF<sub>x</sub>, ΣF<sub>y</sub>, ΣM, and nodal equilibrium rebuilt from the member forces, are reported in Results and in the solver log.</li>
         </ol>
       </section>
       <section>
-        <h3>Assumptions &amp; limitations</h3>
+        <h3>Assumptions and limitations</h3>
         <ul>
-          <li>Pin-jointed members with axial force only. Loads act at nodes only: self-weight too, as half of each member's weight at each end node. No distributed loads, temperature, or geometric/material non-linearity.</li>
+          <li>Pin-jointed members with axial force only. Loads act at nodes only: self-weight too, as half of each member's weight at each end node. No distributed loads, temperature, or geometric or material nonlinearity.</li>
           <li>Linear theory: equilibrium is written in the undeformed geometry. Geometrically unstable configurations (for example three collinear nodes loaded sideways) are reported as mechanisms.</li>
-          <li>Euler buckling assumes ideal pin-ended members (K = 1). If σ<sub>cr</sub> = P<sub>cr</sub>/A exceeds σ<sub>y</sub>, yielding governs. Inelastic buckling and code resistance factors are not applied.</li>
-          <li>The Douglas Fir preset uses 49.9 MPa, the clear-wood compressive strength parallel to grain at 12 % moisture content (USDA Wood Handbook, coast Douglas-fir), as its limit stress. Graded lumber design values are much lower, so edit this for your grade and code. Its density, 540 kg/m³, is an approximate representative value at 12 % moisture content: specific gravity 0.48 (USDA Forest Products Laboratory, Wood Handbook, 2021, Table 5–3b) × 1.12 × 1000 kg/m³ = 537.6 kg/m³, rounded. Enter your own value if you know it.</li>
+          <li>Euler buckling assumes ideal pin-ended members (K = 1). If σ<sub>cr</sub> = P<sub>cr</sub>/A exceeds σ<sub>y</sub>, yielding governs. Inelastic buckling, imperfections and code resistance factors are not applied.</li>
+          <li>The Douglas fir preset uses 49.9 MPa, the clear-wood compressive strength parallel to grain at 12 % moisture content (USDA Wood Handbook, coast Douglas-fir), as its limit stress. Graded lumber design values are much lower, so edit this for your grade and code. Its density, 540 kg/m³, is an approximate representative value at 12 % moisture content: specific gravity 0.48 (USDA Forest Products Laboratory, Wood Handbook, 2021, Table 5–3b) × 1.12 × 1000 kg/m³ = 537.6 kg/m³, rounded. Enter your own value if you know it.</li>
+          <li>TrussLab is an educational analysis tool, not certified structural design software. A code-compliant design also needs the load combinations of a standard, resistance factors, imperfections, connection design and serviceability rules that TrussLab does not implement.</li>
         </ul>
       </section>
     </div>
   </div>
 </div>
 
-<div class="toast" id="toast" hidden></div>
+<div class="toast" id="toast" role="status" hidden></div>
 
 <script src="fea-core.js"></script>
 <script src="model.js"></script>
+<script src="education.js"></script>
+<script src="design.js"></script>
+<script src="lessons.js"></script>
 <script src="script.js"></script>
 </body>
 </html>

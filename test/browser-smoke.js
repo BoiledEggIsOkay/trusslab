@@ -26,7 +26,7 @@
  *   - Synthetic events have no default actions: a synthetic Enter does not press a button
  *     and a synthetic arrow key does not move a slider. The test checks that the app leaves
  *     those keys alone (no preventDefault, no app action), not what the browser does next.
- *   - Only one branch of the side-panel button runs, chosen by the window width (920 px).
+ *   - Only one branch of the side-panel button runs, chosen by the layout (one panel at a time at 1100 px or less).
  */
 (function () {
   'use strict';
@@ -476,12 +476,13 @@
   scenario('Side-panel button', async () => {
     const w = window.innerWidth, app = el('#app');
     const shown = (sel) => getComputedStyle(el(sel)).display !== 'none';
-    if (w > 920) {
+    if (T.layout() === 'phone') { skip('side-panel button', `the phone layout (${w} px) stacks both panels under the canvas`); return; }
+    if (T.layout() === 'wide') { // milestone 6: one side panel at a time at 1100 px or less (T.layout() names the layout)
       press('#btnPanels');
       check(`wide window (${w} px): a click hides both side panels`, app.classList.contains('no-panels') && !shown('#leftPanel') && !shown('#rightPanel'));
       press('#btnPanels');
       check('a second click shows them again', !app.classList.contains('no-panels') && shown('#leftPanel') && shown('#rightPanel'));
-      skip('narrow-window cycle (left, right, none)', `needs a window 920 px wide or less; this one is ${w} px`);
+      skip('narrow-window cycle (left, right, none)', `needs a window 1100 px wide or less; this one is ${w} px`);
     } else {
       press('#btnPanels');
       check(`narrow window (${w} px): the first click shows only the left panel`, shown('#leftPanel') && !shown('#rightPanel'));
@@ -489,8 +490,246 @@
       check('the second click shows only the right panel', !shown('#leftPanel') && shown('#rightPanel'));
       press('#btnPanels');
       check('the third click hides both', !shown('#leftPanel') && !shown('#rightPanel'));
-      skip('wide-window toggle', `needs a window wider than 920 px; this one is ${w} px`);
+      skip('wide-window toggle', `needs a window wider than 1100 px; this one is ${w} px`);
     }
+  });
+
+  /* ------------------------------------------------------------------ milestone 6: workspaces, modes, layout */
+  scenario('Workspaces and Guided/Technical change what is shown, never the model or the results', async () => {
+    await loadExample('pratt');
+    const modelBefore = JSON.stringify(model()), forces = () => JSON.stringify(T.results().members.map((m) => m.force));
+    const res0 = forces();
+    for (const ws of ['learn', 'design', 'analyze']) {
+      press(`.ws-nav [data-ws="${ws}"]`); await settle();
+      const pane = el(`#pane${ws[0].toUpperCase()}${ws.slice(1)}`);
+      check(`the ${ws} workspace is selected and shows only its own panel`, T.settings().workspace === ws &&
+        el(`.ws-nav [data-ws="${ws}"]`).getAttribute('aria-selected') === 'true' && !pane.hidden && $$('#leftPanel [data-pane]').filter((p) => !p.hidden).length === 1);
+      check(`... and the model and its results are unchanged (${ws})`, JSON.stringify(model()) === modelBefore && forces() === res0);
+    }
+    const ev = key('ArrowLeft', el('.ws-nav [data-ws="analyze"]'));
+    check('ArrowLeft on the workspace tabs moves to Learn (tabs keyboard pattern)', ev.defaultPrevented && T.settings().workspace === 'learn');
+    press('.ws-nav [data-ws="analyze"]');
+    press('#btnTechnical'); await settle();
+    check('Technical is pressed, recorded and applied', T.settings().uiMode === 'technical' && el('#btnTechnical').getAttribute('aria-pressed') === 'true' && el('#app').classList.contains('mode-technical'));
+    check('... and the stability diagnostics in Results are open', !!$('#health details.more[open]'));
+    press('#btnGuided'); await settle();
+    check('Guided closes them again', T.settings().uiMode === 'guided' && !$('#health details.more[open]') && el('#app').classList.contains('mode-guided'));
+    check('switching modes changed neither the model nor the results', JSON.stringify(model()) === modelBefore && forces() === res0);
+    press('#rtabResults');
+    check('the Results tab shows the report and hides the Inspector', !el('#paneResults').hidden && el('#paneInspector').hidden && el('#rtabResults').getAttribute('aria-selected') === 'true');
+    key('v'); await click(1.5, 0);
+    check('selecting a member brings the Inspector back', T.selection().members.join() === '0' && !el('#paneInspector').hidden && /Member M1/.test(text('#inspector')));
+    key('Escape');
+    press('#btnView');
+    check('View opens its settings', !el('#viewMenu').hidden && el('#btnView').getAttribute('aria-expanded') === 'true');
+    el('#viewMenu').click();
+    check('... a click inside keeps them open', !el('#viewMenu').hidden);
+    key('Escape');
+    check('... and Esc closes them', el('#viewMenu').hidden && el('#btnView').getAttribute('aria-expanded') === 'false');
+    press('#btnFile');
+    check('File opens its menu', !el('#fileMenu').hidden);
+    document.body.click();
+    check('... and clicking elsewhere closes it', el('#fileMenu').hidden);
+  });
+
+  scenario('View-only layout (phones): every edit is refused, inspecting still works', async () => {
+    await loadExample('aframe');
+    const before = JSON.stringify(model()), apex = model().nodes.findIndex((n) => n.x === 3 && n.y === 4);
+    must('the A-frame has its apex at (3, 4)', apex >= 0);
+    T.setViewOnlyForTest(true); await settle();
+    check('the view-only note is shown and every edit form is disabled', !el('#phoneNote').hidden && $$('fieldset.edit').length > 0 && $$('fieldset.edit').every((f) => f.disabled));
+    check('... but the case or combination can still be chosen', !el('#selLoadCase').disabled);
+    key('n');
+    check('N does not switch to the node tool', T.tool() === 'select');
+    check('the drawing tools are disabled', el('.tool[data-tool="member"]').disabled && !el('.tool[data-tool="select"]').disabled);
+    await click(3, 4);
+    check('a tap selects the apex to inspect it', T.selection().nodes.join() === String(apex) && /Node N/.test(text('#inspector')) && !!$('#inspector fieldset[disabled]'));
+    setValue('#inspector [data-f="x"]', '9');
+    key('Delete'); await settle();
+    key('ArrowRight'); await settle();
+    ctrl('z'); await settle();
+    await drag(3, 4, 5, 5);
+    check('Inspector changes, Delete, arrow keys, Ctrl+Z and dragging changed nothing', JSON.stringify(model()) === before);
+    T.setViewOnlyForTest(false); await settle();
+    check('leaving view-only enables the forms and tools again', $$('fieldset.edit').every((f) => !f.disabled) && !el('.tool[data-tool="member"]').disabled && el('#phoneNote').hidden);
+    key('Escape');
+  });
+
+  scenario('Learn: the guided first truss checks each step from the model', async () => {
+    press('.ws-nav [data-ws="learn"]');
+    if ($('#paneLearn [data-learn="home"]')) press('#paneLearn [data-learn="home"]');
+    press('#paneLearn [data-learn="build"]');
+    must('the activity offers to start from an empty model', !!$('#paneLearn [data-learn-act="empty"]'));
+    press('#paneLearn [data-learn-act="empty"]'); await settle();
+    must('the model is empty, and the node tool is active', model().nodes.length === 0 && T.tool() === 'node');
+    await click(0, 0); await click(4, 0); await click(2, 3);
+    check('three nodes complete step 1', /Step 2 of 5/.test(text('#paneLearn')), text('#paneLearn').slice(0, 120));
+    key('m'); await click(0, 0); await click(4, 0); await click(2, 3); await click(0, 0); key('Escape');
+    check('a triangle of members completes step 2', model().members.length === 3 && /Step 3 of 5/.test(text('#paneLearn')));
+    key('s'); setValue('#toSupType', 'pin'); await click(0, 0); setValue('#toSupType', 'rollerX'); await click(4, 0);
+    check('a pin and a roller complete step 3', /Step 4 of 5/.test(text('#paneLearn')));
+    key('l'); setValue('#toFx', '0'); setValue('#toFy', '-10'); setValue('#toLoadMode', 'set'); await click(2, 3); await settle();
+    check('a load completes step 4, and the solved truss step 5', T.results().ok && /All five steps done/.test(text('#paneLearn')));
+    // closed form, joint A (0, 0): R_A = 5 kN by symmetry; R_A + N_AC·3/√13 = 0 and N_AB + N_AC·2/√13 = 0
+    near('... the bar to the apex carries N_AC = −5√13/3 kN (joint A, vertical equilibrium)', T.results().members[2].force, -5000 * Math.sqrt(13) / 3, 1e-12);
+    near('... and the tie N_AB = +10/3 kN (joint A, horizontal equilibrium)', T.results().members[0].force, 10000 / 3, 1e-12);
+    key('v');
+    press('.ws-nav [data-ws="analyze"]');
+  });
+
+  /* ------------------------------------------------------------------ milestone 7: worked calculations, prediction */
+  scenario('Worked calculations: the Inspector shows the solver\'s numbers step by step', async () => {
+    await loadExample('aframe'); // pins (0, 0) and (6, 0), apex (3, 4), 100 kN down: N = −62.5 kN in each bar
+    key('v'); await click(1.5, 2);
+    must('member M1 (N1 to the apex) is selected', T.selection().members.join() === '0');
+    check('the headline is the solver\'s axial force, −62.5 kN, compression', /Axial force N\s*−62\.5\d* kN\s*compression/.test(text('#inspector')), text('#inspector').slice(0, 200));
+    check('the calculation names each step: δ, then N = (E·A/L)·δ, σ = N/A, ε = δ/L',
+      /How N is calculated/.test(text('#inspector')) && /δ = c·\(uxj − uxi\)/.test(text('#inspector')) && /N = \(E·A\/L\)·δ/.test(text('#inspector')) && /σ = N\/A/.test(text('#inspector')) && /ε = δ\/L/.test(text('#inspector')));
+    check('... and the checks: σy/|σ|, Pcr = π²·E·I/(K·L)² with K = 1, and Pcr/|N| (subscripts typeset)', /SFyield = σy \/ \|σ\|/.test(text('#inspector')) && /K = 1/.test(text('#inspector')) && /SFbuckling = Pcr \/ \|N\|/.test(text('#inspector')));
+    check('Guided opens the calculation', !!$('#inspector details.explain[open]'));
+    press('#btnTechnical'); await settle();
+    check('Technical closes it and opens the full list of values instead', !$('#inspector details.explain[open]') && !!$('#inspector details.more[open]'));
+    press('#btnGuided'); await settle();
+    await click(0, 0);
+    check('at the pin, the reaction is explained by joint equilibrium', /R = −\(F \+ Σ member forces on the node\)/.test(text('#inspector')));
+    key('Escape');
+  });
+
+  scenario('Prediction: results stay hidden until every member is answered, then the solver checks them', async () => {
+    await loadExample('aframe');
+    const before = JSON.stringify(model());
+    press('.ws-nav [data-ws="learn"]');
+    if ($('#paneLearn [data-learn="home"]')) press('#paneLearn [data-learn="home"]'); // Learn reopens the last activity
+    press('#paneLearn [data-learn="predict"]'); await settle();
+    check('the results are hidden: verdict, Results tab and Inspector say so', /Predict first/.test(text('#statusPill')) && /Results hidden/.test(text('#health')) && el('#legend').hidden);
+    check('"Check my predictions" waits for every member', el('#paneLearn [data-pact="check"]').disabled);
+    key('v'); await click(1.5, 2);
+    check('selecting a member shows no force in the Inspector while predicting', T.selection().members.join() === '0' && /Hidden until you check your predictions/.test(text('#inspector')) && !/−62\.5/.test(text('#inspector')));
+    press('#paneLearn [data-pchoice="compression"][data-k="0"]');
+    press('#paneLearn [data-pchoice="tension"][data-k="1"]');
+    check('... and is enabled once both members have an answer', !el('#paneLearn [data-pact="check"]').disabled);
+    press('#paneLearn [data-pact="check"]'); await settle();
+    check('checking: 1 of 2 right (both bars are in compression), and the results appear', /1 of 2 right/.test(text('#paneLearn')) && !/Results hidden/.test(text('#health')) && /Governing SF/.test(text('#health')));
+    check('the wrong answer is explained from the solver\'s δ: the bar gets shorter', /M2 gets shorter/.test(text('#paneLearn')));
+    press('#paneLearn [data-pact="again"]'); await settle();
+    check('"Try the wrong ones again" keeps the right answer and hides the results again',
+      el('#paneLearn [data-pchoice="compression"][data-k="0"]').getAttribute('aria-pressed') === 'true' && el('#paneLearn [data-pchoice="tension"][data-k="1"]').getAttribute('aria-pressed') === 'false' && /Results hidden/.test(text('#health')));
+    press('#paneLearn [data-pchoice="compression"][data-k="1"]');
+    press('#paneLearn [data-pact="check"]'); await settle();
+    check('second attempt: 2 of 2 right', /2 of 2 right/.test(text('#paneLearn')));
+    press('.ws-nav [data-ws="analyze"]'); await settle();
+    check('back in Analyze the results are shown, and the model was never changed', /Solved/.test(text('#statusPill')) && JSON.stringify(model()) === before);
+  });
+
+  /* ------------------------------------------------------------------ milestone 8: free-body diagram, method of joints */
+  const openLearn = (view) => {
+    press('.ws-nav [data-ws="learn"]');
+    if ($('#paneLearn [data-learn="home"]')) press('#paneLearn [data-learn="home"]');
+    press(`#paneLearn [data-learn="${view}"]`);
+  };
+  scenario('Free-body diagram: the isolated apex balances, with the solver\'s forces', async () => {
+    await loadExample('aframe');
+    openLearn('fbd'); await settle();
+    await click(3, 4);
+    check('the apex is drawn as a free body (SVG) with three forces: two bars and the load', !!$('#paneLearn .fbd svg') && $$('#paneLearn .comp-table tbody tr').length === 3);
+    check('ΣFx and ΣFy are written out and found to be zero', /ΣFx=/.test(text('#paneLearn').replace(/\s+/g, '')) && /ΣFy=/.test(text('#paneLearn').replace(/\s+/g, '')) && /Both sums are zero/.test(text('#paneLearn')));
+    check('the bars are listed in compression, −62.5 kN each in x and y components', /M1 \(compression\)/.test(text('#paneLearn')) && /M2 \(compression\)/.test(text('#paneLearn')));
+    press('.ws-nav [data-ws="analyze"]');
+    await click(0, 0);
+    must('the left pin is selected in Analyze', T.selection().nodes.length === 1);
+    press('#inspector [data-act="fbd"]'); await settle();
+    check('the Inspector\'s link opens the free-body diagram of that node in Learn', T.settings().workspace === 'learn' && /Node N1/.test(text('#paneLearn')) && /Reaction R/.test(text('#paneLearn')));
+    press('.ws-nav [data-ws="analyze"]');
+  });
+
+  scenario('Method of joints: answers are checked joint by joint against the solver', async () => {
+    await loadExample('aframe'); // N1 (0, 0) and N2 (6, 0) pinned, apex N3: N = −62.5 kN in M1 and M2
+    openLearn('joints'); await settle();
+    check('the solver\'s results are hidden while the exercise runs', /results are hidden/.test(text('#statusPill')) && /Results hidden/.test(text('#health')));
+    check('the exercise starts at a joint with one unknown: N1, with M1', T.selection().nodes.join() === '0' && !!$('#paneLearn [data-jans="0"]'));
+    setValue('#paneLearn [data-jans="0"]', '62.5'); press('#paneLearn [data-jact="check"]'); await settle();
+    check('+62.5 kN: right size, wrong sign', /right size, wrong sign/.test(text('#paneLearn')));
+    setValue('#paneLearn [data-jans="0"]', '-62.5'); press('#paneLearn [data-jact="check"]'); await settle();
+    check('−62.5 kN is right: M1 is found, and the next solvable joint is selected', /1 of 2 member forces found/.test(text('#paneLearn')) && T.selection().nodes.length === 1 && T.selection().nodes[0] !== 0);
+    const k = $('#paneLearn [data-jans]') ? $('#paneLearn [data-jans]').dataset.jans : null;
+    must('the next joint asks for the other bar', k === '1');
+    setValue('#paneLearn [data-jans="1"]', '-62.5'); press('#paneLearn [data-jact="check"]'); await settle();
+    check('every member found: the exercise says so and the results are shown again', /Every member force is found/.test(text('#paneLearn')) && !/Results hidden/.test(text('#health')));
+    press('.ws-nav [data-ws="analyze"]');
+  });
+
+  /* ------------------------------------------------------------------ milestone 9: Solver Explorer */
+  scenario('Solver Explorer: fourteen stages over the solver\'s own matrices', async () => {
+    await loadExample('aframe'); // E 200 GPa, A 1000 mm², L 5 m, c = ±0.6: E·A/L·c² = 14 400 kN/m per bar
+    setValue('#selMtxUnit', 'kN/m');
+    openLearn('explorer'); await settle();
+    check('fourteen stages, starting with the model', $$('#paneLearn [data-xstage]').length === 14 && /1\. The structural model/.test(text('#paneLearn')));
+    press('#paneLearn [data-xstage="5"]'); await settle();
+    must('stage 6 is the global assembly, with the 6 × 6 K', /6\. Global stiffness assembly/.test(text('#paneLearn')) && $$('#paneLearn table.mtx tbody tr').length === 6);
+    press('#paneLearn td[data-r="4"][data-c="4"]'); await settle();
+    check('selecting K[3x, 3x] shows the sum of the two bars: 14400 + 14400 = 28800 kN/m (closed form 2·(E·A/L)·c²)', /K\[3x, 3x\] = 14400 \(M1\) \+ 14400 \(M2\) = 28800 kN\/m/.test(text('#paneLearn')), text('#paneLearn').slice(0, 400));
+    press('#paneLearn [data-xnav="1"]'); await settle();
+    check('Next goes to stage 7, the boundary conditions', /7\. Boundary conditions/.test(text('#paneLearn')));
+    press('#paneLearn [data-xstage="10"]'); await settle();
+    check('stage 11 gives the apex displacement u3y = −1.953 mm and a zero residual', /11\. Displacements/.test(text('#paneLearn')) && /−1\.953/.test(text('#paneLearn')) && /equations are satisfied/.test(text('#paneLearn')));
+    await loadExample('mechanism'); await settle();
+    check('for a mechanism, the stages after the reduced matrix are unavailable', $$('#paneLearn [data-xstage]').slice(10).every((b) => b.disabled) && !$$('#paneLearn [data-xstage]')[9].disabled);
+    press('.ws-nav [data-ws="analyze"]');
+  });
+
+  /* ------------------------------------------------------------------ milestone 10: design checks, deflection, sizing */
+  scenario('Design: checks over every state, the reference-chord criterion, and a sizing proposal (undoable)', async () => {
+    await loadExample('pratt'); // N1 (0, 0) pin, N7 (18, 0) roller, N4 (9, 0) mid-span; chords CHS 139.7×6.3, web CHS 88.9×5
+    press('.ws-nav [data-ws="design"]'); await settle();
+    check('the checks state the verdict over every state: SF 2.44 at M9 is the lowest', /Every member has SF ≥ 1\.50 in every state/.test(text('#designTools')) && /SF 2\.44 at M9/.test(text('#designTools')));
+    check('without a criterion, deflection is "not configured" (no universal limit is assumed)', /Not configured/.test(text('#designTools')) && !('design' in model()));
+    setValue('#dfA', '0'); setValue('#dfB', '6');
+    press($$('#designTools [data-dfnode]')[3]);
+    setValue('#dfValue', '1200');
+    press('#dfSave'); await settle();
+    check('the criterion is saved in the model with node ids: chord N1–N7, node N4, span/1200',
+      JSON.stringify(model().design) === JSON.stringify({ deflection: { chordA: 1, chordB: 7, nodes: [4], limit: { type: 'ratio', value: 1200 } } }), JSON.stringify(model().design));
+    check('... and the strength-sized truss fails it (δ above 18 m / 1200 = 15 mm)', /✕ Largest δ = /.test(text('#designTools')));
+    ctrl('z'); await settle();
+    check('Ctrl+Z removes the criterion', !('design' in model()));
+    ctrl('z', true); await settle();
+    check('Ctrl+Shift+Z brings it back', !!model().design);
+    const areasBefore = JSON.stringify(model().sections.map((x) => x.A));
+    press('#dsRun'); await settle();
+    check('the proposal converges and meets the deflection limit', /Converged/.test(text('#designTools')) && !el('#dsApply').disabled, text('#designTools').slice(-500));
+    check('... it explains each choice and shows the mass now and proposed', /Why these sections/.test(text('#designTools')) && /Mass proposed/.test(text('#designTools')));
+    check('proposing changes nothing in the model', JSON.stringify(model().sections.map((x) => x.A)) === areasBefore);
+    press('#dsApply'); await settle();
+    check('Apply replaces the sections of the sized groups', JSON.stringify(model().sections.map((x) => x.A)) !== areasBefore && /Deflection.*✓ pass/.test(text('#designTools').replace(/\s+/g, ' ')));
+    ctrl('z'); await settle();
+    check('Ctrl+Z restores the original sections', JSON.stringify(model().sections.map((x) => x.A)) === areasBefore);
+    setValue('#dfValue', '20000'); press('#dfSave'); await settle();
+    press('#dsRun'); await settle();
+    check('an impossible limit: not acceptable, and Apply stays disabled', /deflection limit cannot be met/.test(text('#designTools')) && el('#dsApply').disabled);
+    press('.ws-nav [data-ws="analyze"]');
+  });
+
+  /* ------------------------------------------------------------------ milestone 11: lessons */
+  scenario('Lessons: a lesson with its worked example from the solver, a check, a challenge, and progress', async () => {
+    press('.ws-nav [data-ws="learn"]');
+    if ($('#paneLearn [data-learn="home"]')) press('#paneLearn [data-learn="home"]');
+    must('the Learn home lists six lessons', $$('#paneLearn .activity-list [data-lesson]').length >= 6 && /0 of 6 complete/.test(text('#paneLearn')));
+    press('#paneLearn [data-lesson="stress"]'); await settle();
+    check('lesson 4 opens with its objectives, equations and the variables table', /Lesson 4: Stress, strain and deformation/.test(text('#paneLearn')) && /σ = N\/A/.test(text('#paneLearn')) && !!$('#paneLearn table.vars'));
+    press('#paneLearn [data-lact="model"]'); await settle();
+    check('opening the lesson model shows the worked example with the solver\'s numbers: N = −62.5 kN', model().nodes.length === 3 && /−62\.5/.test(text('#paneLearn')) && /Check Hooke/.test(text('#paneLearn')));
+    press('#paneLearn [data-quiz="0"][data-opt="0"]'); await settle();
+    check('a wrong answer is marked and explained', /Not quite/.test(text('#paneLearn')) && /equilibrium/.test(text('#paneLearn')));
+    press('#paneLearn [data-quiz="0"][data-opt="2"]'); await settle();
+    check('the right answer is marked right', /✓ Right/.test(text('#paneLearn')));
+    press('#paneLearn [data-lact="challenge"]'); await settle();
+    check('the challenge is judged on the model: 62.5 MPa does not meet "at most 50 MPa"', /✕ every \|σ\| ≤ 50 MPa/.test(text('#paneLearn')) && !/Challenge met/.test(text('#paneLearn')));
+    press('#paneLearn [data-lact="complete"]'); await settle();
+    const stored = readStorage('trusslab.smoke-test.learn.v1');
+    check('marking it complete saves the progress under the smoke-test key, with the right answer recorded',
+      !!stored && JSON.parse(stored).completed.includes('stress') && JSON.parse(stored).exercises['quiz:stress:0'] === true && JSON.parse(stored).current === 'stability');
+    check('no user storage key was written', userKeysSnapshot() === userKeysBefore);
+    press('.ws-nav [data-ws="analyze"]');
   });
 
   scenario('Load cases: add, rename, switch and delete; undo keeps the case you are looking at', async () => {

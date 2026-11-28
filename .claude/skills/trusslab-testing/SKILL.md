@@ -33,6 +33,7 @@ const out = typeof console !== 'undefined' && console.log ? console.log.bind(con
 ```
 
 - Load extra DOM-free files the same way: `require('../model.js')` under Node, `load('model.js')` under jsc, after `fea-core.js`.
+- Suites: `test/fea-core.test.js` (engine), `test/model.test.js` (`model.js`), `test/education.test.js` (`education.js`: guided build, worked calculations, predictions, free-body diagrams, method of joints, Solver Explorer), `test/design.test.js` (`design.js`: catalogue, checks, sizing, deflection), `test/lessons.test.js` (`lessons.js`: lesson format, worked examples, challenges, progress storage). Each new DOM-free file gets its own suite, loading its dependencies in the `index.html` order.
 - `test/model.test.js` covers `model.js`. Its example checks compare against `test/fixtures/examples-baseline.js`, the results captured from the code before milestone 2. That file is a regression baseline: never regenerate it to make a test pass. A deliberate change to an example or to the analysis updates it in the same commit, with the reason.
 - Compare with closed-form or hand-statics references, and write the reference down in a comment. Use relative tolerances: about 1e-14 for direct closed forms, looser only with a stated reason, such as cancellation in a small reaction.
 - Wrap each group of checks in `testCase`, so a crash counts as a failure instead of ending the run.
@@ -47,7 +48,8 @@ Code that touches browser storage takes the storage object as a parameter (`load
 
 A test that has never been seen to fail has not been shown to detect anything.
 - For a bug fix, run the new test on the unfixed code first.
-- For a suite, run it against a deliberately broken copy. For example: copy `fea-core.js` into the scratchpad with `sed 's/const N = e.k \* elong;/const N = e.k * elong * (1 + 1e-9);/'`, run the suite from that folder, and confirm that it fails and exits non-zero.
+- For a suite, run it against a deliberately broken copy (in the scratchpad, never the working tree). Milestones 6–11 were checked this way: a wrong member-force sign in the free-body diagram, Euler with L instead of L², the chord reference removed from the deflection, progress written after a failed read, the zero-force rule applied at a loaded joint, and, in the browser, the view-only Inspector guard and the result hiding of the prediction removed; each was caught. A mutation that a stable truss cannot observe (for example two collinear members at an unloaded joint, which is always a mechanism) is equivalent, not a gap.
+- A recipe for the engine: copy `fea-core.js` into the scratchpad with `sed 's/const N = e.k \* elong;/const N = e.k * elong * (1 + 1e-9);/'`, run the suite from that folder, and confirm that it fails and exits non-zero.
 
 ## Browser smoke test
 
@@ -55,7 +57,8 @@ A test that has never been seen to fail has not been shown to detect anything.
   - `index.html?smoke` runs every scenario and must end with PASS.
   - `index.html?smoke=selftest` adds one deliberately failing scenario. It ends with PASS only if exactly that scenario fails and every clean-up check still passes.
 - Results go to the on-page panel, the console (`[smoke]` lines) and `window.TrussLabSmokeResult`.
-- Report browser verification only when it has actually been performed in a browser, whether by you through a connected browser tool or by the user. If no browser is available, say so, list the smoke test as unverified, and give the user the manual verification steps in `docs/development/local-testing.md`.
+- **Headless Chrome**: `python3 -I .claude/skills/trusslab-testing/scripts/browser_check.py` runs both modes in headless Google Chrome (throwaway profile, stdlib-only DevTools client) and exits 1 unless both are PASS; `--shots DIR` also saves screenshots at 1440, 1280, 1024 and 390 px (phone emulation). Report it as "headless Chrome". It does not cover Safari or Firefox, real touch, or native pointer capture.
+- Report browser verification only when it has actually been performed in a browser, whether by you through a connected browser tool, through `browser_check.py`, or by the user. If no browser is available, say so, list the smoke test as unverified, and give the user the manual verification steps in `docs/development/local-testing.md`.
 - If the page loads without its styles, or a local server is needed, see `docs/development/local-testing.md`. A local server is a testing workaround only: never make the app or a test depend on one.
 
 ### How it works

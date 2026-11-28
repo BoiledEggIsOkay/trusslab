@@ -1,5 +1,7 @@
 # TrussLab UI audit (milestone 6, step 1)
 
+> **Status:** the audit of the interface before milestone 6. The redesign (Midnight Engineering Lab, `tokens.md`) addresses its findings; it is kept as the record of where the redesign started.
+
 This is the audit that the redesign starts from. It covers every surface, control, state, flow and keyboard path of the interface as it stands after milestone 5 (load combinations), and names the sources of unnecessary complexity with evidence.
 
 **How it was made.** No browser was available, so it was made by reading `index.html`, `style.css` and `script.js` and by measuring them with scripts, not from screenshots. Counts are exact for the source at the milestone 5 working tree, on top of `16d3fc9` (Rev 7). The screenshots that the `trusslab-ui-design` process asks for are still to be taken at 1440, 1280, 1024, 900 and 390 px; until then, anything about rendered size or overlap is inferred from the CSS and marked as such.
